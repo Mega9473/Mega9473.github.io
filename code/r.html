@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="主観評価と客観計測の混合効果モデルを用いた統計解析を、コードと生成図で紹介します。"><title>Rのコード・成果物｜妻鹿成紘</title><link rel="icon" href="data:,"><link rel="stylesheet" href="../assets/style.css"><link rel="stylesheet" href="../assets/code.css"></head>
+<body class="code-page"><a class="skip-link" href="#main">本文へ移動</a><header class="site-header"><div class="header-inner"><a class="site-title" href="../index.html">妻鹿成紘の研究ポートフォリオ</a><a class="back-home" href="../index.html#skills">← 使用技術へ戻る</a></div></header>
+<main id="main" class="page-width" tabindex="-1"><div class="code-intro"><p class="code-eyebrow">コード・成果物</p><h1>R</h1></div><nav class="category-nav" aria-label="使用技術のカテゴリ"><a href="unity.html">Unity / C#</a><a href="python.html">Python</a><a href="r.html" aria-current="page">R</a><a href="arduino.html">Arduino / C++</a><a href="cad.html">Fusion / 3Dプリンタ</a></nav><article class="code-item" id="r1" aria-labelledby="r1-title"><div class="item-heading"><h2 id="r1-title">主観評価の条件間比較（LMM）</h2></div><p class="item-description">反発感・抵抗感・振動強度の評定値を線形混合効果モデル（LMM）で解析し，振動条件ごとの推定周辺平均と条件間の差を算出するスクリプト。</p><figure class="code-figure"><a href="files/03_r/output/r1/figures/Subjective_Springiness.png" target="_blank" rel="noopener"><img src="files/03_r/output/r1/figures/Subjective_Springiness.png" alt="主観評価の条件間比較（LMM）の図" loading="lazy" decoding="async"></a><figcaption>反発感の推定周辺平均と95%信頼区間（13名）。星印はHolm補正後の条件間比較の結果。 <a href="files/03_r/output/r1/figures/Subjective_Springiness.png" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><details class="code-disclosure" open><summary><span>コードを見る：r1_subjective_lmm.R</span><span class="line-count">360行</span></summary><div class="file-toolbar"><span>03_r/R/r1_subjective_lmm.R</span><a href="files/03_r/R/r1_subjective_lmm.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="r1_subjective_lmm.Rのソースコード"><code># R1: selected portfolio version. Only Intensity excludes No-Vib.
+# 解析条件
+COND_LEVELS_ALL &lt;- c(&quot;No-Vib&quot;, &quot;Const-Low&quot;, &quot;Const-High&quot;, &quot;Env-F&quot;, &quot;Env-xF&quot;)
+COND_LEVELS_VIB &lt;- c(&quot;Const-Low&quot;, &quot;Const-High&quot;, &quot;Env-F&quot;, &quot;Env-xF&quot;)
+
+SUBJECTIVE_METRICS &lt;- c(&quot;Springiness&quot;, &quot;Resistance&quot;, &quot;Intensity&quot;)
+
+COND_COLORS &lt;- c(
+  &quot;No-Vib&quot;     = &quot;#4D4D4D&quot;,
+  &quot;Const-Low&quot;  = &quot;#4E9F3D&quot;,
+  &quot;Const-High&quot; = &quot;#E69F00&quot;,
+  &quot;Env-F&quot;      = &quot;#D55E5E&quot;,
+  &quot;Env-xF&quot;     = &quot;#4C78A8&quot;
+)
+
+# p値を有意記号に変換
+sig_label &lt;- function(p) {
+  case_when(
+    is.na(p)  ~ &quot;&quot;,
+    p &lt; 0.001 ~ &quot;***&quot;,
+    p &lt; 0.01  ~ &quot;**&quot;,
+    p &lt; 0.05  ~ &quot;*&quot;,
+    TRUE      ~ &quot;&quot;
+  )
+}
+
+# Outcome列を先頭に移動
+move_outcome_first &lt;- function(df) {
+  if (&quot;Outcome&quot; %in% names(df)) {
+    df %&gt;% select(Outcome, everything())
+  } else {
+    df
+  }
+}
+
+# 保存用ファイル名に整形
+safe_filename &lt;- function(x) {
+  x %&gt;%
+    str_replace_all(&quot;[/\\\\:*?\&quot;&lt;&gt;| ]+&quot;, &quot;_&quot;) %&gt;%
+    str_replace_all(&quot;__+&quot;, &quot;_&quot;)
+}
+
+# 解析用関数
+# 1指標ずつLMMを実行
+run_lmm_one &lt;- function(df, outcome, vib_only = FALSE) {
+
+  if (vib_only) {
+    dat &lt;- df %&gt;%
+      filter(Condition %in% COND_LEVELS_VIB) %&gt;%
+      mutate(Condition = factor(as.character(Condition), levels = COND_LEVELS_VIB)) %&gt;%
+      drop_na(all_of(outcome), Condition, Set, Participant)
+  } else {
+    dat &lt;- df %&gt;%
+      filter(Condition %in% COND_LEVELS_ALL) %&gt;%
+      mutate(Condition = factor(as.character(Condition), levels = COND_LEVELS_ALL)) %&gt;%
+      drop_na(all_of(outcome), Condition, Set, Participant)
+  }
+
+  fit &lt;- lmer(
+    as.formula(paste0(outcome, &quot; ~ Condition + Set + (1 | Participant)&quot;)),
+    data = dat,
+    REML = FALSE
+  )
+
+  anova_df &lt;- anova(fit, type = &quot;III&quot;, ddf = &quot;Satterthwaite&quot;) %&gt;%
+    as.data.frame() %&gt;%
+    rownames_to_column(&quot;Term&quot;) %&gt;%
+    as_tibble() %&gt;%
+    mutate(
+      Outcome = outcome,
+      Sig = sig_label(`Pr(&gt;F)`)
+    ) %&gt;%
+    move_outcome_first()
+
+  coef_df &lt;- summary(fit)$coefficients %&gt;%
+    as.data.frame() %&gt;%
+    rownames_to_column(&quot;Term&quot;) %&gt;%
+    as_tibble() %&gt;%
+    mutate(
+      Outcome = outcome,
+      Sig = sig_label(`Pr(&gt;|t|)`)
+    ) %&gt;%
+    move_outcome_first()
+
+  emm &lt;- emmeans(fit, ~ Condition)
+
+  emm_df &lt;- as.data.frame(emm) %&gt;%
+    as_tibble() %&gt;%
+    mutate(
+      Outcome = outcome
+    ) %&gt;%
+    move_outcome_first()
+
+  ctr_df &lt;- contrast(emm, method = &quot;pairwise&quot;, adjust = &quot;holm&quot;) %&gt;%
+    summary(infer = c(TRUE, TRUE)) %&gt;%
+    as_tibble() %&gt;%
+    mutate(
+      Outcome = outcome,
+      Sig = sig_label(p.value)
+    ) %&gt;%
+    move_outcome_first()
+
+  list(
+    fit = fit,
+    anova_df = anova_df,
+    coef_df  = coef_df,
+    emm_df   = emm_df,
+    ctr_df   = ctr_df
+  )
+}
+
+# 有意差バーの位置を作成
+make_bracket_df &lt;- function(emm_df_one, ctr_df_one) {
+
+  cond_levels &lt;- levels(emm_df_one$Condition)
+  if (is.null(cond_levels)) {
+    cond_levels &lt;- unique(as.character(emm_df_one$Condition))
+  }
+
+  y_max &lt;- max(emm_df_one$upper.CL, na.rm = TRUE)
+  y_min &lt;- min(emm_df_one$lower.CL, na.rm = TRUE)
+  y_range &lt;- y_max - y_min
+  if (!is.finite(y_range) || y_range &lt;= 0) y_range &lt;- 1
+
+  ctr_sig &lt;- ctr_df_one %&gt;%
+    filter(!is.na(p.value), p.value &lt; 0.05) %&gt;%
+    mutate(
+      contrast_clean = contrast %&gt;%
+        str_replace_all(&quot;\\(&quot;, &quot;&quot;) %&gt;%
+        str_replace_all(&quot;\\)&quot;, &quot;&quot;)
+    ) %&gt;%
+    separate(
+      contrast_clean,
+      into = c(&quot;group1&quot;, &quot;group2&quot;),
+      sep = &quot; - &quot;,
+      remove = FALSE
+    ) %&gt;%
+    mutate(
+      group1 = factor(str_trim(group1), levels = cond_levels),
+      group2 = factor(str_trim(group2), levels = cond_levels),
+      x1 = as.numeric(group1),
+      x2 = as.numeric(group2)
+    ) %&gt;%
+    filter(!is.na(x1), !is.na(x2)) %&gt;%
+    mutate(
+      xmin_num = pmin(x1, x2),
+      xmax_num = pmax(x1, x2)
+    ) %&gt;%
+    arrange(xmin_num, xmax_num)
+
+  if (nrow(ctr_sig) == 0) return(NULL)
+
+  placed &lt;- vector(&quot;list&quot;, nrow(ctr_sig))
+  occupied &lt;- list()
+
+  overlap_1d &lt;- function(a1, a2, b1, b2) {
+    !(a2 &lt; b1 || b2 &lt; a1)
+  }
+
+  for (i in seq_len(nrow(ctr_sig))) {
+    row &lt;- ctr_sig[i, ]
+    level_i &lt;- 1
+
+    if (length(occupied) &gt; 0) {
+      repeat {
+        hit &lt;- FALSE
+        for (j in seq_along(occupied)) {
+          if (occupied[[j]]$level != level_i) next
+          if (overlap_1d(
+            row$xmin_num, row$xmax_num,
+            occupied[[j]]$xmin_num, occupied[[j]]$xmax_num
+          )) {
+            hit &lt;- TRUE
+            break
+          }
+        }
+        if (!hit) break
+        level_i &lt;- level_i + 1
+      }
+    }
+
+    occupied[[length(occupied) + 1]] &lt;- list(
+      xmin_num = row$xmin_num,
+      xmax_num = row$xmax_num,
+      level = level_i
+    )
+
+    placed[[i]] &lt;- cbind(row, level = level_i)
+  }
+
+  bind_rows(placed) %&gt;%
+    mutate(
+      y = y_max + (0.12 + 0.16 * (level - 1)) * y_range,
+      y_text = y + 0.04 * y_range,
+      tip = 0.03 * y_range
+    )
+}
+
+# EMMプロットを作成
+make_emm_plot_with_brackets &lt;- function(emm_df_one, ctr_df_one, outcome) {
+
+  cond_levels &lt;- unique(as.character(emm_df_one$Condition))
+
+  emm_df_one &lt;- emm_df_one %&gt;%
+    mutate(Condition = factor(as.character(Condition), levels = cond_levels))
+
+  br_df &lt;- make_bracket_df(emm_df_one, ctr_df_one)
+
+  base_y_min &lt;- min(emm_df_one$lower.CL, na.rm = TRUE)
+  base_y_max &lt;- max(emm_df_one$upper.CL, na.rm = TRUE)
+  base_y_rng &lt;- base_y_max - base_y_min
+  if (!is.finite(base_y_rng) || base_y_rng &lt;= 0) base_y_rng &lt;- 1
+
+  p &lt;- ggplot(
+    emm_df_one,
+    aes(x = Condition, y = emmean, color = Condition)
+  ) +
+    geom_point(size = 6.0, stroke = 1.8) +
+    geom_errorbar(
+      aes(ymin = lower.CL, ymax = upper.CL),
+      width = 0.27,
+      linewidth = 1.65
+    ) +
+    scale_x_discrete(drop = FALSE) +
+    scale_color_manual(values = COND_COLORS, drop = FALSE) +
+    theme_classic(base_size = 12) +
+    labs(
+      title = outcome,
+      x = &quot;Condition&quot;,
+      y = &quot;Estimated marginal mean&quot;
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 20, hjust = 1),
+      plot.title = element_text(face = &quot;bold&quot;, hjust = 0.5),
+      plot.margin = margin(t = 18, r = 28, b = 12, l = 12),
+      legend.position = &quot;none&quot;,
+      axis.line = element_line(linewidth = 1.35, colour = &quot;black&quot;),
+      axis.ticks = element_line(linewidth = 1.35, colour = &quot;black&quot;),
+      axis.ticks.length = unit(4.8, &quot;mm&quot;)
+    )
+
+  if (!is.null(br_df) &amp;&amp; nrow(br_df) &gt; 0) {
+    p &lt;- p +
+      geom_segment(
+        data = br_df,
+        aes(x = x1, xend = x2, y = y, yend = y),
+        inherit.aes = FALSE,
+        linewidth = 1.5,
+        color = &quot;black&quot;
+      ) +
+      geom_segment(
+        data = br_df,
+        aes(x = x1, xend = x1, y = y, yend = y - tip),
+        inherit.aes = FALSE,
+        linewidth = 1.5,
+        color = &quot;black&quot;
+      ) +
+      geom_segment(
+        data = br_df,
+        aes(x = x2, xend = x2, y = y, yend = y - tip),
+        inherit.aes = FALSE,
+        linewidth = 1.5,
+        color = &quot;black&quot;
+      ) +
+      geom_text(
+        data = br_df,
+        aes(x = (x1 + x2) / 2, y = y_text, label = Sig),
+        size = 8.0,
+        inherit.aes = FALSE,
+        color = &quot;black&quot;
+      ) +
+      coord_cartesian(
+        ylim = c(
+          base_y_min,
+          max(br_df$y_text, na.rm = TRUE) + 0.08 * base_y_rng
+        ),
+        clip = &quot;off&quot;
+      )
+  } else {
+    p &lt;- p +
+      coord_cartesian(
+        ylim = c(base_y_min, base_y_max + 0.08 * base_y_rng),
+        clip = &quot;off&quot;
+      )
+  }
+
+  p
+}
+
+run_r1 &lt;- function(input_csv, output_dir) {
+  old &lt;- options(contrasts = c(&quot;contr.sum&quot;, &quot;contr.poly&quot;))
+  on.exit(options(old), add = TRUE)
+  emmeans::emm_options(lmer.df = &quot;satterthwaite&quot;)
+  OUT_DIR &lt;- output_dir
+  FIG_DIR &lt;- file.path(output_dir, &quot;figures&quot;)
+  dir.create(FIG_DIR, recursive = TRUE, showWarnings = FALSE)
+  if (!file.exists(input_csv)) stop(&quot;R1 input CSV is missing: &quot;, input_csv)
+  # 主観評価CSVを読み込み
+  df &lt;- read_csv(input_csv, show_col_types = FALSE) %&gt;%
+    mutate(
+      Participant = factor(Participant),
+      Set = factor(Set),
+      Trial = suppressWarnings(as.integer(Trial)),
+      Condition = factor(as.character(Condition), levels = COND_LEVELS_ALL)
+    )
+  
+  subj_exist &lt;- SUBJECTIVE_METRICS[SUBJECTIVE_METRICS %in% names(df)]
+  if (length(subj_exist) == 0) stop(&quot;No subjective metrics found.&quot;)
+  
+  # LMM実行
+  anova_list &lt;- list()
+  coef_list  &lt;- list()
+  emm_list   &lt;- list()
+  ctr_list   &lt;- list()
+  
+  for (met in subj_exist) {
+    cat(&quot;[running] &quot;, met, &quot;\n&quot;, sep = &quot;&quot;)
+  
+    # Intensityは振動条件内で比較
+    use_vib_only &lt;- (met == &quot;Intensity&quot;)
+    res &lt;- run_lmm_one(df, met, vib_only = use_vib_only)
+  
+    anova_list[[met]] &lt;- res$anova_df
+    coef_list[[met]]  &lt;- res$coef_df
+    emm_list[[met]]   &lt;- res$emm_df
+    ctr_list[[met]]   &lt;- res$ctr_df
+  
+    p_each &lt;- make_emm_plot_with_brackets(
+      res$emm_df,
+      res$ctr_df,
+      met
+    ) + labs(caption = paste0(
+      &quot;EMM with 95% CI; pairwise p-values: Holm correction.\n&quot;,
+      &quot;Selected-source rerun; &quot;, nobs(res$fit), &quot; observations, &quot;,
+      length(unique(model.frame(res$fit)$Participant)), &quot; participants. &quot;,
+      if (use_vib_only) &quot;No-Vib excluded.&quot; else &quot;No-Vib included.&quot;
+    )) + theme(plot.caption = element_text(hjust = 0, size = 9))
+  
+    save_plot_pair(
+      p_each,
+      file.path(FIG_DIR, paste0(&quot;Subjective_&quot;, safe_filename(met))),
+      width = 6.8,
+      height = 5.6
+    )
+  }
+  
+  anova_all &lt;- bind_rows(anova_list) %&gt;% move_outcome_first()
+  coef_all  &lt;- bind_rows(coef_list)  %&gt;% move_outcome_first()
+  emm_all   &lt;- bind_rows(emm_list)   %&gt;% move_outcome_first()
+  ctr_all   &lt;- bind_rows(ctr_list)   %&gt;% move_outcome_first()
+  
+  # 結果保存
+  write_excel_csv(anova_all, file.path(OUT_DIR, &quot;LMM_subject_anova.csv&quot;))
+  write_excel_csv(coef_all,  file.path(OUT_DIR, &quot;LMM_subject_coefficients.csv&quot;))
+  write_excel_csv(emm_all,   file.path(OUT_DIR, &quot;LMM_subject_EMM.csv&quot;))
+  write_excel_csv(ctr_all,   file.path(OUT_DIR, &quot;LMM_subject_CONTRAST_pairwise.csv&quot;))
+  
+  invisible(list(anova = anova_all, coefficients = coef_all,
+                 emm = emm_all, contrasts = ctr_all))
+}
+</code></pre></details><p class="item-documentation"><a href="files/03_r/README.md" download>詳細（README）</a></p></article><article class="code-item" id="r2" aria-labelledby="r2-title"><div class="item-heading"><h2 id="r2-title">力・動作データの条件間比較（LMM）</h2></div><p class="item-description">反力・把持力・速度・最大位置の計測値を線形混合効果モデル（LMM）で解析し，剛性・振動条件による違いを比較するスクリプト。</p><figure class="code-figure"><a href="files/03_r/output/r2/figures/R2_objective_EMMs.png" target="_blank" rel="noopener"><img src="files/03_r/output/r2/figures/R2_objective_EMMs.png" alt="力・動作データの条件間比較（LMM）の図" loading="lazy" decoding="async"></a><figcaption>SI2026の計測データを再解析した条件別の推定周辺平均と95%信頼区間（12名・202試行）。 <a href="files/03_r/output/r2/figures/R2_objective_EMMs.png" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><details class="code-disclosure" open><summary><span>コードを見る：r2_objective_lmm.R</span><span class="line-count">169行</span></summary><div class="file-toolbar"><span>03_r/R/r2_objective_lmm.R</span><a href="files/03_r/R/r2_objective_lmm.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="r2_objective_lmm.Rのソースコード"><code># 反力・把持力・速度・xmax: value ~ stiffness * vibration + set + (1 | subject)
+# RMS: Vibのみ、value ~ stiffness + set + (1 | subject)
+# REML、Satterthwaite自由度。主効果・交互作用のp値は未補正。
+
+fit_objective &lt;- function(data, formula) {
+  control &lt;- lmerControl(optimizer = &quot;bobyqa&quot;, optCtrl = list(maxfun = 200000), calc.derivs = TRUE)
+  fit_record(lmerTest::lmer(formula, data = data, REML = TRUE, control = control, na.action = na.fail))
+}
+
+# 指定した係数群が同時に0かを検定する。
+objective_joint_test &lt;- function(fit, pattern) {
+  indices &lt;- grep(pattern, names(fixef(fit)))
+  stopifnot(length(indices) == 2L)
+  L &lt;- matrix(0, nrow = 2, ncol = length(fixef(fit)))
+  L[cbind(1:2, indices)] &lt;- 1
+  as.data.frame(contestMD(fit, L, ddf = &quot;Satterthwaite&quot;))
+}
+
+# 剛性3条件とSetを等重み平均したVib=Nonの1自由度F検定。
+# 同じ対比のt検定とF=t^2、自由度、p値が一致することを確認する。
+objective_vibration_test &lt;- function(fit) {
+  emm &lt;- emmeans(fit, ~ vibration, at = list(vibration = c(0, 1)),
+                 weights = &quot;equal&quot;, lmer.df = &quot;satterthwaite&quot;)
+  stopifnot(identical(as.numeric(emm@grid$vibration), c(0, 1)))
+  basis &lt;- contrast(emm, list(Vib_minus_Non = c(-1, 1)), adjust = &quot;none&quot;)
+  L &lt;- basis@linfct
+  stopifnot(qr(L)$rank == 1L, ncol(L) == length(fixef(fit)))
+  joint &lt;- as.data.frame(contestMD(fit, L, ddf = &quot;Satterthwaite&quot;))
+  diagnostic &lt;- as.data.frame(summary(basis, infer = c(TRUE, TRUE),
+                                      level = .95, adjust = &quot;none&quot;))
+  stopifnot(joint$NumDF == 1L,
+            isTRUE(all.equal(joint$DenDF, diagnostic$df, tolerance = 1e-8)),
+            isTRUE(all.equal(joint[[&quot;F value&quot;]], diagnostic$t.ratio^2, tolerance = 1e-10)),
+            isTRUE(all.equal(joint[[&quot;Pr(&gt;F)&quot;]], diagnostic$p.value, tolerance = 1e-10)))
+  list(emm = emm, joint = joint)
+}
+
+# Vib・NonとSetを等重み平均したLow=Mid=Highの全体F検定。
+# 2対比は全体検定の基底であり、個別の対比較検定は行わない。
+objective_stiffness_test &lt;- function(fit) {
+  emm &lt;- emmeans(fit, ~ stiffness, at = list(vibration = c(0, 1)),
+                 weights = &quot;equal&quot;, lmer.df = &quot;satterthwaite&quot;)
+  stopifnot(identical(as.character(emm@grid$stiffness), c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;)))
+  basis &lt;- contrast(emm, list(Mid_minus_Low = c(-1, 1, 0),
+                              High_minus_Low = c(-1, 0, 1)), adjust = &quot;none&quot;)
+  L &lt;- basis@linfct
+  stopifnot(qr(L)$rank == 2L, ncol(L) == length(fixef(fit)))
+  joint &lt;- as.data.frame(contestMD(fit, L, ddf = &quot;Satterthwaite&quot;))
+  stopifnot(joint$NumDF == 2L)
+  list(emm = emm, joint = joint)
+}
+
+objective_diagnostics &lt;- function(record, metric) {
+  fit &lt;- record$model
+  data.frame(metric, formula = paste(deparse(formula(fit)), collapse = &quot; &quot;),
+             n_trials = nobs(fit), optimizer_code = fit@optinfo$conv$opt,
+             singular = isSingular(fit, tol = 1e-4),
+             convergence_messages = paste(fit@optinfo$conv$lme4$messages, collapse = &quot; | &quot;),
+             warnings = paste(record$warnings, collapse = &quot; | &quot;),
+             messages = paste(record$messages, collapse = &quot; | &quot;))
+}
+
+run_objective &lt;- function() {
+  data &lt;- combine_objective_phases()
+  # xmax入力: 押し込み開始～戻し終了(折返し停止を含む)の各往復最大位置の2往復平均。
+  # 元エンコーダ位置[mm]。フィルタ・原点の再設定・300 mmでの打切りは行っていない。
+  xmax &lt;- read_input(&quot;xmax_trials.csv&quot;)
+  xmax$value[xmax$status != &quot;ok&quot;] &lt;- NA_real_
+  data &lt;- rbind(data, xmax[names(data)])
+  write_result(data, &quot;objective_trial_values&quot;)
+  units &lt;- c(reaction = &quot;N&quot;, grip = &quot;N&quot;, speed = &quot;mm/s&quot;, xmax = &quot;mm&quot;)
+  models &lt;- tests &lt;- posthoc &lt;- emms &lt;- diagnostics &lt;- residuals_all &lt;- list()
+  stiffness_tests &lt;- stiffness_emms &lt;- list()
+  cohort &lt;- NULL
+
+  for (metric in names(units)) {
+    current &lt;- data[data$metric == metric &amp; is.finite(data$value), ]
+    stopifnot(nrow(current) == 202L, all(current$n_cycles == 2L))
+    if (is.null(cohort)) cohort &lt;- trial_key(current)
+    stopifnot(setequal(cohort, trial_key(current)))
+    current &lt;- objective_factors(current)
+    record &lt;- fit_objective(current, value ~ stiffness * vibration + set + (1 | subject))
+    fit &lt;- record$model
+    models[[metric]] &lt;- record
+    diagnostics[[metric]] &lt;- objective_diagnostics(record, metric)
+    residuals_all[[metric]] &lt;- data.frame(metric, current[c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;)],
+                                        fitted = fitted(fit), residual = residuals(fit))
+
+    vibration &lt;- objective_vibration_test(fit)
+    vibration_joint &lt;- vibration$joint
+    average &lt;- contrast_summary(vibration$emm, vibration_contrast)
+    joint &lt;- objective_joint_test(fit, &quot;stiffness.*:vibration|vibration:stiffness&quot;)
+    stiffness &lt;- objective_stiffness_test(fit)
+    stiffness_joint &lt;- stiffness$joint
+    stiffness_tests[[metric]] &lt;- data.frame(
+      metric, unit = units[[metric]], n_trials = nobs(fit),
+      n_subjects = nlevels(current$subject), effect = &quot;Stiffness&quot;, test = &quot;F&quot;,
+      F = stiffness_joint[[&quot;F value&quot;]], df1 = stiffness_joint$NumDF,
+      df2 = stiffness_joint$DenDF, p_raw = stiffness_joint[[&quot;Pr(&gt;F)&quot;]]
+    )
+    stiffness_emms[[metric]] &lt;- data.frame(
+      metric, unit = units[[metric]],
+      as.data.frame(confint(stiffness$emm, level = .95, adjust = &quot;none&quot;))
+    )
+    tests[[metric]] &lt;- data.frame(
+      metric, unit = units[[metric]], estimate = average$estimate, SE = average$SE,
+      lower95 = average$lower.CL, upper95 = average$upper.CL,
+      vibration_F = vibration_joint[[&quot;F value&quot;]], vibration_df1 = vibration_joint$NumDF,
+      vibration_df2 = vibration_joint$DenDF, p_raw = vibration_joint[[&quot;Pr(&gt;F)&quot;]],
+      t_diagnostic = average$t.ratio, t_df_diagnostic = average$df,
+      t_p_raw_diagnostic = average$p_raw,
+      interaction_F = joint[[&quot;F value&quot;]], interaction_df1 = joint$NumDF,
+      interaction_df2 = joint$DenDF, interaction_p_raw = joint[[&quot;Pr(&gt;F)&quot;]],
+      stiffness_F = stiffness_joint[[&quot;F value&quot;]], stiffness_df1 = stiffness_joint$NumDF,
+      stiffness_df2 = stiffness_joint$DenDF, stiffness_p_raw = stiffness_joint[[&quot;Pr(&gt;F)&quot;]]
+    )
+    condition_emm &lt;- emmeans(fit, ~ stiffness * vibration, at = list(vibration = c(0, 1)),
+                             weights = &quot;equal&quot;, lmer.df = &quot;satterthwaite&quot;)
+    emms[[metric]] &lt;- data.frame(metric, as.data.frame(confint(condition_emm, level = .95, adjust = &quot;none&quot;)))
+
+    # 交互作用が有意な指標のみ、3剛性のVib−Non比較を行い、指標内でHolm補正。
+    if (joint[[&quot;Pr(&gt;F)&quot;]] &lt; alpha) {
+      simple &lt;- emmeans(fit, ~ vibration | stiffness, at = list(vibration = c(0, 1)),
+                         weights = &quot;equal&quot;, lmer.df = &quot;satterthwaite&quot;)
+      posthoc[[metric]] &lt;- data.frame(metric, contrast_summary(simple, vibration_contrast, holm = TRUE))
+    }
+    cat(metric, &quot; LMM 完了\n&quot;)
+  }
+
+  # RMS入力: 各往復の時間加重平均を除去した時間加重RMS。バンドパスなし。
+  rms &lt;- read_input(&quot;rms_trials.csv&quot;)
+  current &lt;- rms[rms$vibration == 1 &amp; is.finite(rms$value), ]
+  stopifnot(nrow(current) == 100L, all(current$n_cycles == 2L),
+            all(is.finite(current$cycle1_RMS)), all(is.finite(current$cycle2_RMS)),
+            max(abs(current$value - (current$cycle1_RMS + current$cycle2_RMS) / 2)) &lt; 1e-10)
+  current$value &lt;- (current$cycle1_RMS + current$cycle2_RMS) / 2
+  current &lt;- objective_factors(current)
+  record &lt;- fit_objective(current, value ~ stiffness + set + (1 | subject))
+  fit &lt;- record$model
+  models$RMS &lt;- record
+  diagnostics$RMS &lt;- objective_diagnostics(record, &quot;RMS&quot;)
+  residuals_all$RMS &lt;- data.frame(metric = &quot;RMS&quot;, current[c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;)],
+                                fitted = fitted(fit), residual = residuals(fit))
+  joint &lt;- objective_joint_test(fit, &quot;^stiffness&quot;)
+  rms_emm &lt;- emmeans(fit, ~ stiffness, weights = &quot;equal&quot;, lmer.df = &quot;satterthwaite&quot;)
+  write_result(data.frame(F = joint[[&quot;F value&quot;]], df1 = joint$NumDF, df2 = joint$DenDF,
+                          p_raw = joint[[&quot;Pr(&gt;F)&quot;]]), &quot;RMS_omnibus&quot;)
+  write_result(as.data.frame(confint(rms_emm, level = .95, adjust = &quot;none&quot;)), &quot;RMS_EMMs&quot;)
+  if (joint[[&quot;Pr(&gt;F)&quot;]] &lt; alpha) {
+    write_result(contrast_summary(rms_emm, stiffness_contrasts, holm = TRUE), &quot;RMS_posthoc&quot;)
+  }
+  # 現在のRMS図はEMMではなく、参加者内平均の参加者間平均±SD。
+  participant_means &lt;- aggregate(value ~ subject + stiffness, current, mean)
+  rms_summary &lt;- do.call(rbind, lapply(levels(current$stiffness), function(stiffness) {
+    values &lt;- participant_means$value[participant_means$stiffness == stiffness]
+    data.frame(stiffness, n_subjects = length(values), mean_RMS = mean(values), SD = sd(values))
+  }))
+  write_result(rms_summary, &quot;RMS_descriptive&quot;)
+
+  write_result(do.call(rbind, tests), &quot;objective_tests&quot;)
+  write_result(do.call(rbind, stiffness_tests), &quot;objective_stiffness_tests&quot;)
+  write_result(do.call(rbind, stiffness_emms), &quot;objective_stiffness_EMMs&quot;)
+  if (length(posthoc)) write_result(do.call(rbind, posthoc), &quot;objective_posthoc&quot;)
+  write_result(do.call(rbind, emms), &quot;objective_EMMs&quot;)
+  write_result(do.call(rbind, diagnostics), &quot;objective_diagnostics&quot;)
+  write_result(do.call(rbind, residuals_all), &quot;objective_residuals&quot;)
+  saveRDS(models, file.path(output_dir, &quot;objective_models.rds&quot;))
+  cat(&quot;RMS LMM 完了\n&quot;)
+}
+</code></pre></details><p class="item-documentation"><a href="files/03_r/README.md" download>詳細（README）</a></p></article><article class="code-item" id="r3" aria-labelledby="r3-title"><div class="item-heading"><h2 id="r3-title">7段階評定の順序尺度解析（CLMM）</h2></div><p class="item-description">7段階の回答を順序尺度として扱い，剛性・振動条件による評定の違いを累積リンク混合モデル（CLMM）で解析するスクリプト。</p><figure class="code-figure"><a href="files/03_r/output/r3/figures/R3_Q1_Q2_predictions.png" target="_blank" rel="noopener"><img src="files/03_r/output/r3/figures/R3_Q1_Q2_predictions.png" alt="7段階評定の順序尺度解析（CLMM）の図" loading="lazy" decoding="async"></a><figcaption>CLMMによる条件別の予測評定と95%信頼区間（12名，各項目214試行）。 <a href="files/03_r/output/r3/figures/R3_Q1_Q2_predictions.png" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><details class="code-disclosure" open><summary><span>コードを見る：r3_subjective_clmm.R</span><span class="line-count">158行</span></summary><div class="file-toolbar"><span>03_r/R/r3_subjective_clmm.R</span><a href="files/03_r/R/r3_subjective_clmm.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="r3_subjective_clmm.Rのソースコード"><code># Q1・Q2: rating ~ stiffness * vibration + set + (1 + vc | subject)
+# stiffness * vibration = stiffness + vibration + stiffness:vibration
+# 固定効果のvibrationは因子(1=Non, 2=Vib)。vcはNon=-0.5, Vib=+0.5。
+# Q3: Vibのみ、rating ~ stiffness + set + (1 | subject)
+
+fit_subjective &lt;- function(data, formula, nAGQ) {
+  control &lt;- clmm.control(
+    method = &quot;nlminb&quot;, maxIter = 200, gradTol = 1e-6, maxLineIter = 100,
+    iter.max = 1000, eval.max = 2000, rel.tol = 1e-10
+  )
+  fit_record(clmm(formula, data = data, link = &quot;logit&quot;, threshold = &quot;flexible&quot;,
+                  nAGQ = nAGQ, Hess = TRUE, control = control, na.action = na.fail))
+}
+
+with_odds_ratio &lt;- function(result) {
+  result$OR &lt;- exp(result$estimate)
+  result$OR_lower95 &lt;- exp(result$asymp.LCL)
+  result$OR_upper95 &lt;- exp(result$asymp.UCL)
+  result
+}
+
+# 剛性の全体検定: 潜在尺度EMMの独立な2対比に対するWald χ²検定。
+stiffness_wald &lt;- function(emm) {
+  contrasts &lt;- contrast(emm, stiffness_contrasts[1:2], adjust = &quot;none&quot;)
+  difference &lt;- as.data.frame(contrasts)$estimate
+  statistic &lt;- drop(crossprod(difference, solve(vcov(contrasts), difference)))
+  list(statistic = statistic, p = pchisq(statistic, df = 2, lower.tail = FALSE))
+}
+
+# 図示: ランダム効果を0としたカテゴリ確率の積和 E[Y]=sum(k*P[Y=k])。
+# 比較・図示しない固定因子は等重みで平均。CIは未補正95%。
+expected_rating &lt;- function(fit, data, by) {
+  formula &lt;- as.formula(paste(&quot;~ rating |&quot;, paste(by, collapse = &quot; * &quot;)))
+  probabilities &lt;- emmeans(fit, formula, mode = &quot;prob&quot;, weights = &quot;equal&quot;, data = data)
+  scores &lt;- as.numeric(as.character(unique(probabilities@grid$rating)))
+  stopifnot(identical(scores, as.numeric(1:7)))
+  result &lt;- as.data.frame(summary(
+    contrast(probabilities, list(expected_score = scores), by = by, adjust = &quot;none&quot;),
+    infer = c(TRUE, FALSE), level = 0.95, adjust = &quot;none&quot;
+  ))
+  for (name in setdiff(c(&quot;stiffness&quot;, &quot;vibration&quot;), names(result))) result[[name]] &lt;- &quot;average&quot;
+  result
+}
+
+subjective_diagnostics &lt;- function(record, id) {
+  fit &lt;- record$model
+  data.frame(
+    model = id, formula = paste(deparse(formula(fit)), collapse = &quot; &quot;),
+    n_trials = nobs(fit), nAGQ = fit$nAGQ,
+    convergence_code = fit$optRes$convergence,
+    max_gradient = max(abs(fit$gradient)),
+    min_hessian_eigenvalue = min(eigen(fit$Hessian, symmetric = TRUE, only.values = TRUE)$values),
+    warnings = paste(record$warnings, collapse = &quot; | &quot;),
+    messages = paste(record$messages, collapse = &quot; | &quot;)
+  )
+}
+
+run_subjective &lt;- function() {
+  data &lt;- read_subjective()
+  models &lt;- tests &lt;- posthoc &lt;- predictions &lt;- diagnostics &lt;- sets &lt;- list()
+  for (question in c(&quot;Q1&quot;, &quot;Q2&quot;, &quot;Q3&quot;)) {
+    current &lt;- data[data$question == question, ]
+    if (question == &quot;Q3&quot;) current &lt;- current[current$vibration == &quot;2&quot;, ]
+    stopifnot(nrow(current) == if (question == &quot;Q3&quot;) 106L else 214L,
+              nlevels(current$subject) == 12L)
+
+    # 固定効果・ランダム効果の構造と積分近似は現在の解析と同一。
+    full &lt;- if (question == &quot;Q3&quot;) {
+      fit_subjective(current, rating ~ stiffness + set + (1 | subject), nAGQ = 9L)
+    } else {
+      fit_subjective(current, rating ~ stiffness * vibration + set + (1 + vc | subject), nAGQ = 1L)
+    }
+    fit &lt;- full$model
+    models[[question]] &lt;- list(full = full)
+    diagnostics[[question]] &lt;- subjective_diagnostics(full, question)
+
+    stiffness_emm &lt;- emmeans(fit, ~ stiffness, mode = &quot;latent&quot;, weights = &quot;equal&quot;, data = current)
+    stiffness_test &lt;- stiffness_wald(stiffness_emm)
+    tests[[paste0(question, &quot;_stiffness&quot;)]] &lt;- data.frame(
+      question, effect = &quot;Stiffness&quot;, test = &quot;Wald chi-square&quot;,
+      statistic = stiffness_test$statistic, df = 2, estimate = NA_real_, SE = NA_real_,
+      lower95 = NA_real_, upper95 = NA_real_, OR = NA_real_,
+      OR_lower95 = NA_real_, OR_upper95 = NA_real_, p_raw = stiffness_test$p
+    )
+
+    interaction_p &lt;- NA_real_
+    if (question != &quot;Q3&quot;) {
+      vibration_emm &lt;- emmeans(fit, ~ vibration, mode = &quot;latent&quot;, weights = &quot;equal&quot;, data = current)
+      average &lt;- with_odds_ratio(contrast_summary(vibration_emm, vibration_contrast))
+      tests[[paste0(question, &quot;_vibration&quot;)]] &lt;- data.frame(
+        question, effect = &quot;Vibration&quot;, test = &quot;Wald z&quot;, statistic = average$z.ratio,
+        df = NA_real_, estimate = average$estimate, SE = average$SE,
+        lower95 = average$asymp.LCL, upper95 = average$asymp.UCL,
+        OR = average$OR, OR_lower95 = average$OR_lower95, OR_upper95 = average$OR_upper95,
+        p_raw = average$p_raw
+      )
+      # 交互作用のみを除いたモデルとのLRT。同じデータ・ランダム効果を使用。
+      additive &lt;- fit_subjective(
+        current, rating ~ stiffness + vibration + set + (1 + vc | subject), nAGQ = 1L
+      )
+      models[[question]]$additive &lt;- additive
+      diagnostics[[paste0(question, &quot;_additive&quot;)]] &lt;- subjective_diagnostics(additive, paste0(question, &quot;_additive&quot;))
+      df &lt;- attr(logLik(fit), &quot;df&quot;) - attr(logLik(additive$model), &quot;df&quot;)
+      lr &lt;- 2 * (as.numeric(logLik(fit)) - as.numeric(logLik(additive$model)))
+      stopifnot(df == 2L, lr &gt;= -1e-6, nobs(fit) == nobs(additive$model))
+      interaction_p &lt;- pchisq(max(0, lr), df, lower.tail = FALSE)
+      tests[[paste0(question, &quot;_interaction&quot;)]] &lt;- data.frame(
+        question, effect = &quot;Interaction&quot;, test = &quot;Likelihood-ratio chi-square&quot;,
+        statistic = lr, df, estimate = NA_real_, SE = NA_real_,
+        lower95 = NA_real_, upper95 = NA_real_, OR = NA_real_,
+        OR_lower95 = NA_real_, OR_upper95 = NA_real_, p_raw = interaction_p
+      )
+    }
+
+    # 交互作用有意なら剛性別Vib−Non。非有意なら有意な剛性主効果の3対比較。
+    # Q3は剛性全体検定が有意な場合に3対比較を報告する。
+    pair &lt;- NULL
+    if (!is.na(interaction_p) &amp;&amp; interaction_p &lt; alpha) {
+      simple &lt;- emmeans(fit, ~ vibration | stiffness, mode = &quot;latent&quot;, weights = &quot;equal&quot;, data = current)
+      pair &lt;- with_odds_ratio(contrast_summary(simple, vibration_contrast, holm = TRUE))
+      pair$comparison &lt;- &quot;Vib_minus_Non_by_stiffness&quot;
+    } else if (stiffness_test$p &lt; alpha) {
+      pair &lt;- with_odds_ratio(contrast_summary(stiffness_emm, stiffness_contrasts, holm = TRUE))
+      pair$stiffness &lt;- &quot;average&quot;
+      pair$comparison &lt;- &quot;stiffness_pairs&quot;
+    }
+    if (!is.null(pair)) {
+      pair$question &lt;- question
+      posthoc[[question]] &lt;- pair
+    }
+
+    scopes &lt;- if (question == &quot;Q3&quot;) list(stiffness = &quot;stiffness&quot;) else list(
+      overall = &quot;vibration&quot;, by_stiffness = c(&quot;stiffness&quot;, &quot;vibration&quot;), stiffness = &quot;stiffness&quot;
+    )
+    for (scope in names(scopes)) {
+      predicted &lt;- expected_rating(fit, current, scopes[[scope]])
+      predicted$question &lt;- question
+      predicted$scope &lt;- scope
+      predictions[[paste(question, scope)]] &lt;- predicted[c(
+        &quot;question&quot;, &quot;scope&quot;, &quot;stiffness&quot;, &quot;vibration&quot;, &quot;estimate&quot;, &quot;SE&quot;, &quot;df&quot;, &quot;asymp.LCL&quot;, &quot;asymp.UCL&quot;
+      )]
+    }
+    # Set係数は推定値と未補正CIを保存する。
+    set_terms &lt;- grep(&quot;^set&quot;, names(fit$beta), value = TRUE)
+    b &lt;- fit$beta[set_terms]
+    se &lt;- sqrt(diag(vcov(fit)))[set_terms]
+    sets[[question]] &lt;- data.frame(question, term = set_terms, estimate = unname(b),
+                                  SE = unname(se), lower95 = unname(b - qnorm(.975) * se),
+                                  upper95 = unname(b + qnorm(.975) * se))
+    cat(question, &quot; CLMM 完了\n&quot;)
+  }
+  write_result(do.call(rbind, tests), &quot;subjective_tests&quot;)
+  if (length(posthoc)) write_result(do.call(rbind, posthoc), &quot;subjective_posthoc&quot;)
+  write_result(do.call(rbind, predictions), &quot;subjective_expected_ratings&quot;)
+  write_result(do.call(rbind, sets), &quot;subjective_Set_coefficients&quot;)
+  write_result(do.call(rbind, diagnostics), &quot;subjective_diagnostics&quot;)
+  saveRDS(models, file.path(output_dir, &quot;subjective_models.rds&quot;))
+}
+</code></pre></details><p class="item-documentation"><a href="files/03_r/README.md" download>詳細（README）</a></p></article><section class="companion-section" aria-labelledby="companion-title"><h2 id="companion-title">関連するソースファイル</h2><p>各作例で使用する通信・計算・保存・作図処理。</p><details class="code-disclosure"><summary><span>関連コード：bootstrap.R</span><span class="line-count">47行</span></summary><div class="file-toolbar"><span>03_r/R/bootstrap.R</span><a href="files/03_r/R/bootstrap.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="bootstrap.Rのソースコード"><code># Only the libraries used by the analyses are attached.
+load_dependencies &lt;- function(root) {
+  extra &lt;- Sys.getenv(&quot;PORTFOLIO_R_EXTRA_LIB&quot;, unset = &quot;&quot;)
+  paths &lt;- c(file.path(root, &quot;r_library&quot;), extra, .libPaths())
+  .libPaths(unique(paths[nzchar(paths) &amp; dir.exists(paths)]))
+  packages &lt;- c(&quot;ordinal&quot;, &quot;lme4&quot;, &quot;lmerTest&quot;, &quot;emmeans&quot;, &quot;dplyr&quot;, &quot;tidyr&quot;,
+                &quot;readr&quot;, &quot;tibble&quot;, &quot;stringr&quot;, &quot;ggplot2&quot;, &quot;svglite&quot;, &quot;jsonlite&quot;)
+  missing &lt;- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing)) stop(&quot;Install missing R packages: &quot;, paste(missing, collapse = &quot;, &quot;),
+                            &quot;. See install_dependencies.R.&quot;)
+  suppressPackageStartupMessages(invisible(lapply(packages, library, character.only = TRUE)))
+  library(grid)
+  invisible(packages)
+}
+
+parse_cli &lt;- function(args, defaults) {
+  if (!length(args)) return(defaults)
+  if (length(args) %% 2L) stop(&quot;Arguments must be --name value pairs.&quot;)
+  for (index in seq.int(1L, length(args), by = 2L)) {
+    key &lt;- sub(&quot;^--&quot;, &quot;&quot;, args[index])
+    if (!startsWith(args[index], &quot;--&quot;) || !key %in% names(defaults)) {
+      stop(&quot;Unknown option: &quot;, args[index])
+    }
+    defaults[[key]] &lt;- args[index + 1L]
+  }
+  defaults
+}
+
+save_plot_pair &lt;- function(plot_obj, file_base, width = 7.2, height = 5.4) {
+  dir.create(dirname(file_base), recursive = TRUE, showWarnings = FALSE)
+  ggplot2::ggsave(paste0(file_base, &quot;.svg&quot;), plot_obj, width = width, height = height,
+                  device = svglite::svglite, bg = &quot;white&quot;)
+  ggplot2::ggsave(paste0(file_base, &quot;.png&quot;), plot_obj, width = width, height = height,
+                  dpi = 180, bg = &quot;white&quot;)
+}
+
+# All SI functions resolve their I/O in this environment, not in global state.
+make_si_context &lt;- function(root, input, output) {
+  context &lt;- new.env(parent = globalenv())
+  context$input_dir &lt;- normalizePath(input, winslash = &quot;/&quot;, mustWork = TRUE)
+  dir.create(output, recursive = TRUE, showWarnings = FALSE)
+  context$output_dir &lt;- normalizePath(output, winslash = &quot;/&quot;, mustWork = TRUE)
+  for (name in c(&quot;si_common.R&quot;, &quot;si_inputs.R&quot;, &quot;r2_objective_lmm.R&quot;, &quot;r3_subjective_clmm.R&quot;)) {
+    sys.source(file.path(root, &quot;R&quot;, name), envir = context, keep.source = FALSE)
+  }
+  context
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：plots.R</span><span class="line-count">67行</span></summary><div class="file-toolbar"><span>03_r/R/plots.R</span><a href="files/03_r/R/plots.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="plots.Rのソースコード"><code># Plots read only CSVs created by the current model run. No historical figure is used.
+analysis_theme &lt;- function() {
+  theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = &quot;top&quot;,
+          plot.title = element_text(face = &quot;bold&quot;),
+          strip.text = element_text(face = &quot;bold&quot;),
+          plot.caption = element_text(hjust = 0, size = 9))
+}
+
+read_result &lt;- function(directory, name) {
+  read.csv(file.path(directory, paste0(name, &quot;.csv&quot;)), check.names = FALSE)
+}
+
+plot_r2 &lt;- function(directory) {
+  data &lt;- read_result(directory, &quot;objective_EMMs&quot;)
+  data$stiffness &lt;- factor(data$stiffness, levels = c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;))
+  data$vibration &lt;- factor(data$vibration, levels = 0:1, labels = c(&quot;Non&quot;, &quot;Vib&quot;))
+  labels &lt;- c(reaction = &quot;Reaction force [N]&quot;, grip = &quot;Grip force [N]&quot;,
+              speed = &quot;Speed [mm/s]&quot;, xmax = &quot;Maximum position [mm]&quot;)
+  data$metric &lt;- factor(data$metric, levels = names(labels), labels = labels)
+  position &lt;- position_dodge(width = .18)
+  plot &lt;- ggplot(data, aes(stiffness, emmean, color = vibration, group = vibration)) +
+    geom_line(position = position, linewidth = .8) +
+    geom_point(position = position, size = 2.8) +
+    geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), position = position, width = .10) +
+    facet_wrap(~ metric, scales = &quot;free_y&quot;, ncol = 2) +
+    scale_color_manual(values = c(Non = &quot;#64748B&quot;, Vib = &quot;#C65D28&quot;)) +
+    labs(title = &quot;Objective outcomes: model-estimated means&quot;, x = &quot;Stiffness&quot;, y = &quot;Estimated marginal mean&quot;,
+         color = &quot;Vibration&quot;, caption = &quot;REML LMM; Satterthwaite df. Error bars: unadjusted 95% CI.\n12 participants; 202 matched trials per outcome. Set is averaged with equal weights.&quot;) +
+    analysis_theme()
+  save_plot_pair(plot, file.path(directory, &quot;figures&quot;, &quot;R2_objective_EMMs&quot;), 10, 7.5)
+
+  rms &lt;- read_result(directory, &quot;RMS_descriptive&quot;)
+  rms$stiffness &lt;- factor(rms$stiffness, levels = c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;))
+  plot &lt;- ggplot(rms, aes(stiffness, mean_RMS)) +
+    geom_point(size = 3.5, color = &quot;#147D92&quot;) +
+    geom_errorbar(aes(ymin = mean_RMS - SD, ymax = mean_RMS + SD), width = .15, color = &quot;#147D92&quot;) +
+    labs(title = &quot;Vibration RMS by stiffness&quot;, x = &quot;Stiffness&quot;, y = &quot;RMS [source-data units]&quot;,
+         caption = &quot;Descriptive mean +/- SD across participant means; not an EMM confidence interval.\nVib trials only; 12 participants, 100 trials. Original RMS preprocessing is retained.&quot;) + analysis_theme()
+  save_plot_pair(plot, file.path(directory, &quot;figures&quot;, &quot;R2_RMS_descriptive&quot;), 7.2, 5.4)
+}
+
+plot_r3 &lt;- function(directory) {
+  all &lt;- read_result(directory, &quot;subjective_expected_ratings&quot;)
+  data &lt;- all[all$scope == &quot;by_stiffness&quot;, ]
+  data$stiffness &lt;- factor(data$stiffness, levels = 2:4, labels = c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;))
+  data$vibration &lt;- factor(data$vibration, levels = 1:2, labels = c(&quot;Non&quot;, &quot;Vib&quot;))
+  position &lt;- position_dodge(width = .18)
+  plot &lt;- ggplot(data, aes(stiffness, estimate, color = vibration, group = vibration)) +
+    geom_line(position = position, linewidth = .8) + geom_point(position = position, size = 3) +
+    geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), position = position, width = .10) +
+    facet_wrap(~question, nrow = 1) +
+    scale_color_manual(values = c(Non = &quot;#64748B&quot;, Vib = &quot;#C65D28&quot;)) +
+    scale_y_continuous(breaks = 1:7) + coord_cartesian(ylim = c(1, 7)) +
+    labs(title = &quot;Ordinal ratings: CLMM predictions&quot;, x = &quot;Stiffness&quot;, y = &quot;Expected rating E[Y]&quot;, color = &quot;Vibration&quot;,
+         caption = &quot;E[Y] = sum(k x P[Y=k]); random effects set to zero. Set averaged equally.\nUnadjusted 95% CI; Q1/Q2 each 214 trials, 12 participants. Predictions are not raw rating means.&quot;) + analysis_theme()
+  save_plot_pair(plot, file.path(directory, &quot;figures&quot;, &quot;R3_Q1_Q2_predictions&quot;), 9.2, 5.5)
+
+  data &lt;- all[all$question == &quot;Q3&quot; &amp; all$scope == &quot;stiffness&quot;, ]
+  data$stiffness &lt;- factor(data$stiffness, levels = 2:4, labels = c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;))
+  plot &lt;- ggplot(data, aes(stiffness, estimate)) + geom_point(size = 3.5, color = &quot;#147D92&quot;) +
+    geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = .12, color = &quot;#147D92&quot;) +
+    scale_y_continuous(breaks = 1:7) + coord_cartesian(ylim = c(1, 7)) +
+    labs(title = &quot;Q3: predicted rating under vibration&quot;, x = &quot;Stiffness&quot;, y = &quot;Expected rating E[Y]&quot;,
+         caption = &quot;CLMM with random intercept; adaptive quadrature nAGQ=9.\nUnadjusted 95% CI; 106 Vib trials, 12 participants. Random effect = 0; Set averaged equally.&quot;) + analysis_theme()
+  save_plot_pair(plot, file.path(directory, &quot;figures&quot;, &quot;R3_Q3_predictions&quot;), 7.2, 5.4)
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：si_common.R</span><span class="line-count">42行</span></summary><div class="file-toolbar"><span>03_r/R/si_common.R</span><a href="files/03_r/R/si_common.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="si_common.Rのソースコード"><code># Numerical helpers retained from the selected SI2026 entry point.
+alpha &lt;- 0.05
+stiffness_contrasts &lt;- list(
+  Mid_minus_Low = c(-1, 1, 0),
+  High_minus_Low = c(-1, 0, 1),
+  High_minus_Mid = c(0, -1, 1)
+)
+vibration_contrast &lt;- list(Vib_minus_Non = c(-1, 1))
+
+read_input &lt;- function(name) {
+  read.csv(file.path(input_dir, name), fileEncoding = &quot;UTF-8-BOM&quot;,
+           check.names = FALSE, na.strings = c(&quot;&quot;, &quot;NA&quot;))
+}
+
+write_result &lt;- function(data, name) {
+  write.csv(data, file.path(output_dir, paste0(name, &quot;.csv&quot;)),
+            row.names = FALSE, na = &quot;&quot;, fileEncoding = &quot;UTF-8&quot;)
+}
+
+# CIは未補正。Holm補正は各項目内の事後比較のp値にのみ適用する。
+contrast_summary &lt;- function(emm, contrasts, holm = FALSE) {
+  result &lt;- as.data.frame(summary(
+    contrast(emm, contrasts, adjust = &quot;none&quot;),
+    infer = c(TRUE, TRUE), level = 0.95, adjust = &quot;none&quot;
+  ))
+  names(result)[names(result) == &quot;p.value&quot;] &lt;- &quot;p_raw&quot;
+  if (holm) result$p_holm &lt;- p.adjust(result$p_raw, method = &quot;holm&quot;)
+  result
+}
+
+# 警告・メッセージは表示を保ち、モデルと一緒に記録する。
+fit_record &lt;- function(expression) {
+  warnings &lt;- messages &lt;- character()
+  model &lt;- withCallingHandlers(
+    expression,
+    warning = function(w) warnings &lt;&lt;- c(warnings, conditionMessage(w)),
+    message = function(m) messages &lt;&lt;- c(messages, conditionMessage(m))
+  )
+  list(model = model, warnings = warnings, messages = messages)
+}
+
+trial_key &lt;- function(data) paste(data$subject, data$set, data$trial, sep = &quot;/&quot;)
+
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：si_inputs.R</span><span class="line-count">72行</span></summary><div class="file-toolbar"><span>03_r/R/si_inputs.R</span><a href="files/03_r/R/si_inputs.R" download>ダウンロード</a></div><pre tabindex="0" aria-label="si_inputs.Rのソースコード"><code># Input-only preparation; numerical values and row order are preserved.
+combine_objective_phases &lt;- function() {
+  # 反力・把持力は20 Hz LPF後、速度は絶対値の時間平均が入力される。
+  # 各往復: 停止を除く押し込み・戻しの時間加重平均。試行: 2往復の等重み平均。
+  phases &lt;- read_input(&quot;objective_phase_means.csv&quot;)
+  stopifnot(nrow(phases) == 214L * 4L * 3L,
+            !anyDuplicated(phases[c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;, &quot;metric&quot;, &quot;cycle&quot;, &quot;direction&quot;)]))
+  keys &lt;- paste(trial_key(phases), phases$metric, sep = &quot;/&quot;)
+  rows &lt;- lapply(unique(keys), function(key) {
+    current &lt;- phases[keys == key, ]
+    stopifnot(nrow(current) == 4L, all(sort(current$cycle) == c(1, 1, 2, 2)))
+    values &lt;- vapply(1:2, function(cycle) {
+      phase &lt;- current[current$cycle == cycle, ]
+      stopifnot(setequal(phase$direction, c(&quot;push&quot;, &quot;return&quot;)))
+      valid &lt;- all(phase$status == &quot;ok&quot; &amp; is.finite(phase$value) &amp;
+                     is.finite(phase$active_time_s) &amp; phase$active_time_s &gt; 0)
+      if (!valid) return(NA_real_)
+      sum(phase$value * phase$active_time_s) / sum(phase$active_time_s)
+    }, numeric(1))
+    result &lt;- current[1, c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;, &quot;stiffness&quot;, &quot;vibration&quot;, &quot;metric&quot;)]
+    result$value &lt;- mean(values)  # 一方の往復が利用不能なら試行値もNA。
+    result$n_cycles &lt;- sum(is.finite(values))
+    result
+  })
+  do.call(rbind, rows)
+}
+
+objective_factors &lt;- function(data) {
+  data$subject &lt;- factor(data$subject)
+  data$set &lt;- factor(data$set, levels = 1:3)
+  data$stiffness &lt;- factor(data$stiffness, levels = c(.1, .125, .15), labels = c(&quot;Low&quot;, &quot;Mid&quot;, &quot;High&quot;))
+  # 客観指標の入力: Non=0, Vib=1。主観データの1/2とは異なる。
+  stopifnot(all(data$vibration %in% 0:1),
+            !anyNA(data[c(&quot;subject&quot;, &quot;set&quot;, &quot;stiffness&quot;, &quot;vibration&quot;, &quot;value&quot;)]),
+            nlevels(data$subject) == 12L, !anyDuplicated(trial_key(data)))
+  data
+}
+
+read_subjective &lt;- function() {
+  raw &lt;- read_input(&quot;subjective_trials.csv&quot;)
+  columns &lt;- c(&quot;参加者&quot;, &quot;セット&quot;, &quot;試行&quot;, &quot;剛性番号&quot;, &quot;振動番号&quot;,
+               &quot;質問番号&quot;, &quot;評定[1-7]&quot;, &quot;除外フラグ&quot;)
+  stopifnot(all(columns %in% names(raw)))
+  data &lt;- raw[columns]
+  names(data) &lt;- c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;, &quot;stiffness&quot;, &quot;vibration&quot;,
+                   &quot;question&quot;, &quot;rating&quot;, &quot;excluded&quot;)
+  stopifnot(nrow(data) == 648L, !anyNA(data),
+            !anyDuplicated(data[c(&quot;subject&quot;, &quot;set&quot;, &quot;trial&quot;, &quot;question&quot;)]),
+            all(data$rating %in% 1:7), all(data$question %in% c(&quot;Q1&quot;, &quot;Q2&quot;, &quot;Q3&quot;)),
+            all(data$stiffness %in% 2:4), all(data$vibration %in% 1:2),
+            all(data$set %in% 1:3), all(data$trial %in% 1:6),
+            all(tolower(data$excluded) %in% c(&quot;true&quot;, &quot;false&quot;)))
+  data$excluded &lt;- tolower(data$excluded) == &quot;true&quot;
+  # Exclusions are data, not identities: require two complete trials, shared
+  # across all three questions. No participant ID is embedded in the code.
+  excluded_by_trial &lt;- split(data, trial_key(data))
+  consistent &lt;- vapply(excluded_by_trial, function(trial) {
+    length(unique(trial$excluded)) == 1L &amp;&amp;
+      setequal(trial$question, c(&quot;Q1&quot;, &quot;Q2&quot;, &quot;Q3&quot;))
+  }, logical(1))
+  stopifnot(all(consistent), sum(data$excluded) == 6L,
+            length(unique(trial_key(data[data$excluded, ]))) == 2L)
+  data &lt;- data[!data$excluded, ]
+  data &lt;- data[order(data$subject, data$set, data$trial), ]
+  data$subject &lt;- factor(data$subject)
+  data$stiffness &lt;- factor(data$stiffness, levels = 2:4)  # Low, Mid, High
+  data$vibration &lt;- factor(data$vibration, levels = 1:2)
+  data$set &lt;- factor(data$set, levels = 1:3)
+  data$vc &lt;- ifelse(data$vibration == &quot;2&quot;, 0.5, -0.5)
+  data$rating &lt;- ordered(data$rating, levels = 1:7)
+  data
+}
+
+</code></pre></details></section><p class="back-bottom"><a href="../index.html#skills">← ホームページの使用技術へ戻る</a></p></main><footer class="site-footer page-width"><p>妻鹿 成紘 / Naruhiro Mega</p><p><a href="../index.html">研究ポートフォリオ</a><a href="../index.html#contact">お問い合わせ</a></p></footer></body></html>

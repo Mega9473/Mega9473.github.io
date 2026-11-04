@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="装置とUnityの通信、押し込み区間の検出、振動包絡線の解析を、コードと生成図で紹介します。"><title>Pythonのコード・成果物｜妻鹿成紘</title><link rel="icon" href="data:,"><link rel="stylesheet" href="../assets/style.css"><link rel="stylesheet" href="../assets/code.css"></head>
+<body class="code-page"><a class="skip-link" href="#main">本文へ移動</a><header class="site-header"><div class="header-inner"><a class="site-title" href="../index.html">妻鹿成紘の研究ポートフォリオ</a><a class="back-home" href="../index.html#skills">← 使用技術へ戻る</a></div></header>
+<main id="main" class="page-width" tabindex="-1"><div class="code-intro"><p class="code-eyebrow">コード・成果物</p><h1>Python</h1></div><nav class="category-nav" aria-label="使用技術のカテゴリ"><a href="unity.html">Unity / C#</a><a href="python.html" aria-current="page">Python</a><a href="r.html">R</a><a href="arduino.html">Arduino / C++</a><a href="cad.html">Fusion / 3Dプリンタ</a></nav><article class="code-item" id="p1" aria-labelledby="p1-title"><div class="item-heading"><h2 id="p1-title">dSPACEとUnityの双方向通信</h2></div><p class="item-description">dSPACEから読み出した計測値をUnityへ送り，Unityから受け取った制御指令をdSPACEへ返すTCP通信スクリプト。</p><details class="code-disclosure" open><summary><span>コードを見る：tcp_bridge.py</span><span class="line-count">106行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/tcp_bridge.py</span><a href="files/02_python/src/portfolio_analysis/tcp_bridge.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="tcp_bridge.pyのソースコード"><code>&quot;&quot;&quot;dSPACE/Unityの改行区切り2値通信。実機APIと通信形式を分離する。&quot;&quot;&quot;
+from __future__ import annotations
+
+import json
+import socket
+import time
+from pathlib import Path
+from typing import Protocol
+
+
+class Device(Protocol):
+    def read_pair(self) -&gt; tuple[float, float]: ...
+    def write_pair(self, pair: tuple[float, float]) -&gt; None: ...
+    def close(self) -&gt; None: ...
+
+
+def encode_measurement(pair: tuple[float, float]) -&gt; bytes:
+    &quot;&quot;&quot;元コードと同じ小数4桁・カンマ・LFで送信する。&quot;&quot;&quot;
+    return f&quot;{pair[0]:.4f},{pair[1]:.4f}\n&quot;.encode(&quot;utf-8&quot;)
+
+
+class CommandBuffer:
+    &quot;&quot;&quot;部分行を保持し、1回の受信で届いた最後の候補行を処理する。&quot;&quot;&quot;
+    def __init__(self):
+        self.pending = &quot;&quot;
+
+    def feed(self, chunk: bytes) -&gt; tuple[float, float] | None:
+        self.pending += chunk.decode(&quot;utf-8&quot;)
+        lines = self.pending.split(&quot;\n&quot;)
+        if self.pending.endswith(&quot;\n&quot;):
+            self.pending = &quot;&quot;
+        else:
+            self.pending = lines[-1]
+            lines = lines[:-1]
+        # 元実装通り、最後のカンマ付き行が不正なら古い行へ戻らない。
+        candidate = next((line.strip() for line in reversed(lines) if &quot;,&quot; in line.strip()), None)
+        if candidate is None:
+            return None
+        parts = candidate.split(&quot;,&quot;)
+        if len(parts) != 2:
+            return None
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            return None
+
+
+def exchange_once(sock: socket.socket, device: Device, parser: CommandBuffer):
+    values = device.read_pair()
+    sock.sendall(encode_measurement(values))
+    command = None
+    try:
+        data = sock.recv(4096)
+        if not data:
+            raise ConnectionError(&quot;Peer closed the connection&quot;)
+        command = parser.feed(data)
+        if command is not None:
+            device.write_pair(command)
+    except socket.timeout:
+        pass
+    return values, command
+
+
+class DSpaceDevice:
+    &quot;&quot;&quot;実機専用。pythonnetとdSPACE XIL 2.2の導入は別途必要。&quot;&quot;&quot;
+    def __init__(self, config: dict):
+        import clr
+        clr.AddReference(&quot;ASAM.XIL.Implementation.TestbenchFactory, Version=2.2.0.0, Culture=neutral, PublicKeyToken=bf471dff114ae984&quot;)
+        clr.AddReference(&quot;ASAM.XIL.Interfaces, Version=2.2.0.0, Culture=neutral, PublicKeyToken=bf471dff114ae984&quot;)
+        from ASAM.XIL.Implementation.TestbenchFactory.Testbench import TestbenchFactory
+        from ASAM.XIL.Interfaces.Testbench.Common.VariableRef.Enum import ValueRepresentation
+        bench = TestbenchFactory().CreateVendorSpecificTestbench(&quot;dSPACE GmbH&quot;, &quot;XIL API&quot;, config[&quot;release_version&quot;])
+        self.value_factory = bench.ValueFactory
+        self.port = bench.MAPortFactory.CreateMAPort(&quot;DemoMAPort&quot;)
+        self.port.Configure(self.port.LoadConfiguration(config[&quot;maport_config_file&quot;]), False)
+        make_ref = lambda p: bench.VariableRefFactory.CreateGenericVariableRef(p, ValueRepresentation.ePhysicalValue)
+        self.read_refs = [make_ref(p) for p in config[&quot;read_paths&quot;]]
+        self.write_refs = [make_ref(p) for p in config[&quot;write_paths&quot;]]
+        if len(self.read_refs) != 2 or len(self.write_refs) != 2:
+            raise ValueError(&quot;Two read paths and two write paths are required&quot;)
+
+    def read_pair(self):
+        return tuple(float(self.port.Read2(ref).Value) for ref in self.read_refs)
+
+    def write_pair(self, pair):
+        for ref, value in zip(self.write_refs, pair):
+            self.port.Write2(ref, self.value_factory.CreateFloatValue(value))
+
+    def close(self):
+        self.port.Dispose()
+
+
+def run_real(config_file: Path, duration: float):
+    &quot;&quot;&quot;実機接続は明示的なrealサブコマンドからのみ実行。未実機検証。&quot;&quot;&quot;
+    config = json.loads(config_file.read_text(encoding=&quot;utf-8&quot;))
+    device = DSpaceDevice(config)
+    try:
+        with socket.create_connection((config[&quot;host&quot;], int(config[&quot;port&quot;])), timeout=3.0) as sock:
+            sock.settimeout(0.01)
+            parser = CommandBuffer()
+            stop = time.monotonic() + duration
+            while time.monotonic() &lt; stop:
+                exchange_once(sock, device, parser)
+                time.sleep(0.001)
+    finally:
+        device.close()
+</code></pre></details><p class="item-documentation"><a href="files/02_python/README.md" download>詳細（README）</a></p></article><article class="code-item" id="p2" aria-labelledby="p2-title"><div class="item-heading"><h2 id="p2-title">押し込み・戻し動作の区間抽出</h2></div><p class="item-description">計測した変位データを平滑化し，しきい値に基づいて押し込み・戻し動作の区間を自動抽出するスクリプト。</p><figure class="code-figure"><a href="files/02_python/results/P2_segments/detected_press_return_regions.png" target="_blank" rel="noopener"><img src="files/02_python/results/P2_segments/detected_press_return_regions.png" alt="押し込み・戻し動作の区間抽出の図" loading="lazy" decoding="async"></a><figcaption>実計測3試行の区間抽出例。青線は平滑化・基線補正後の変位，色付きの範囲は検出した動作区間。 <a href="files/02_python/results/P2_segments/detected_press_return_regions.png" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><details class="code-disclosure" open><summary><span>コードを見る：segmentation.py</span><span class="line-count">146行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/segmentation.py</span><a href="files/02_python/src/portfolio_analysis/segmentation.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="segmentation.pyのソースコード"><code>&quot;&quot;&quot;押し戻し区間の検出。入出力・図描画から計算を分離。&quot;&quot;&quot;
+from __future__ import annotations
+from typing import List, Tuple, Optional, Dict
+import numpy as np
+import pandas as pd
+from .config import (EXPECTED_PRESS_COUNT, START_THRESHOLD_MM, BACKOFF_S, MIN_PRESS_EXCURSION_MM, MIN_PRESS_DURATION_S, MERGE_GAP_S, SMOOTH_WINDOW_S, BASELINE_PERCENTILE, FALLBACK_TO_GLOBAL_BASELINE, SUSPECT_MIN_PEAK_MM, SUSPECT_MIN_INTERPEAK_DROP_MM, SUSPECT_MAX_VALLEY_MM)
+from .signal_utils import (safe_median_dt, contiguous_regions, merge_close_regions, smooth_signal, find_local_peaks)
+
+
+def find_first_condi_drop_index(condi: np.ndarray) -&gt; Optional[int]:
+    &quot;&quot;&quot;
+    Condi(n) &gt; Condi(n+1) となる最初の n を見つけ、
+    その次のサンプル n+1 を「減少後開始位置」として返す。
+    &quot;&quot;&quot;
+    c = np.asarray(condi, dtype=float)
+    if len(c) &lt; 2:
+        return None
+    diff = c[:-1] - c[1:]
+    idx = np.where(np.isfinite(diff) &amp; (diff &gt; 0))[0]
+    if len(idx) == 0:
+        return None
+    return int(idx[0] + 1)
+
+def compute_lower5_mean_baseline(signal: np.ndarray, condi: np.ndarray, percentile: float=BASELINE_PERCENTILE, fallback_to_global: bool=FALLBACK_TO_GLOBAL_BASELINE) -&gt; Tuple[float, str, Optional[int], int]:
+    &quot;&quot;&quot;
+    Condi減少後区間の signal の下位5%値群の平均を baseline とする。
+    戻り値:
+      baseline_value, baseline_method, condi_drop_start_idx, baseline_n
+    &quot;&quot;&quot;
+    x = np.asarray(signal, dtype=float)
+    valid_all = np.isfinite(x)
+    if np.sum(valid_all) == 0:
+        return (np.nan, 'no_valid_signal', None, 0)
+    drop_start_idx = find_first_condi_drop_index(condi)
+
+    def lower_percentile_mean(vals: np.ndarray) -&gt; Tuple[float, int]:
+        vals = vals[np.isfinite(vals)]
+        if len(vals) == 0:
+            return (np.nan, 0)
+        th = np.nanpercentile(vals, percentile)
+        picked = vals[vals &lt;= th]
+        if len(picked) == 0:
+            return (np.nan, 0)
+        return (float(np.nanmean(picked)), int(len(picked)))
+    if drop_start_idx is not None and drop_start_idx &lt; len(x):
+        tail = x[drop_start_idx:]
+        base, n = lower_percentile_mean(tail)
+        if n &gt; 0:
+            return (base, 'condi_drop_tail_lower5_mean', drop_start_idx, n)
+    if fallback_to_global:
+        base, n = lower_percentile_mean(x[valid_all])
+        if n &gt; 0:
+            return (base, 'global_lower5_mean_fallback', drop_start_idx, n)
+    return (np.nan, 'baseline_not_found', drop_start_idx, 0)
+
+def detect_two_peaks_connected_in_region(disp_rel_region: np.ndarray, min_peak_mm: float=SUSPECT_MIN_PEAK_MM, min_interpeak_drop_mm: float=SUSPECT_MIN_INTERPEAK_DROP_MM, max_valley_mm: float=SUSPECT_MAX_VALLEY_MM) -&gt; Dict[str, object]:
+    x = np.asarray(disp_rel_region, dtype=float)
+    result = {'suspect_connected': False, 'num_peaks_over_threshold': 0, 'peak1_idx_local': np.nan, 'peak2_idx_local': np.nan, 'peak1_mm': np.nan, 'peak2_mm': np.nan, 'valley_between_peaks_mm': np.nan, 'interpeak_drop_from_lower_peak_mm': np.nan}
+    if len(x) &lt; 3 or np.sum(np.isfinite(x)) &lt; 3:
+        return result
+    peak_idx_all = find_local_peaks(x)
+    peak_idx = [i for i in peak_idx_all if np.isfinite(x[i]) and x[i] &gt;= min_peak_mm]
+    result['num_peaks_over_threshold'] = len(peak_idx)
+    if len(peak_idx) &lt; 2:
+        return result
+    for p1, p2 in zip(peak_idx[:-1], peak_idx[1:]):
+        if p2 &lt;= p1 + 1:
+            continue
+        peak1 = float(x[p1])
+        peak2 = float(x[p2])
+        valley = float(np.nanmin(x[p1:p2 + 1]))
+        lower_peak = min(peak1, peak2)
+        interpeak_drop = lower_peak - valley
+        if interpeak_drop &gt;= min_interpeak_drop_mm and valley &gt; max_valley_mm:
+            result.update({'suspect_connected': True, 'peak1_idx_local': p1, 'peak2_idx_local': p2, 'peak1_mm': peak1, 'peak2_mm': peak2, 'valley_between_peaks_mm': valley, 'interpeak_drop_from_lower_peak_mm': interpeak_drop})
+            return result
+    return result
+
+def detect_multi_press_in_region(disp_rel_region: np.ndarray, min_peak_mm: float=SUSPECT_MIN_PEAK_MM, min_interpeak_drop_mm: float=SUSPECT_MIN_INTERPEAK_DROP_MM) -&gt; Dict[str, object]:
+    x = np.asarray(disp_rel_region, dtype=float)
+    result = {'suspect_multi_press': False, 'multi_peak1_idx_local': np.nan, 'multi_peak2_idx_local': np.nan, 'multi_peak1_mm': np.nan, 'multi_peak2_mm': np.nan, 'multi_valley_between_peaks_mm': np.nan, 'multi_interpeak_drop_from_lower_peak_mm': np.nan}
+    if len(x) &lt; 3 or np.sum(np.isfinite(x)) &lt; 3:
+        return result
+    peak_idx_all = find_local_peaks(x)
+    peak_idx = [i for i in peak_idx_all if np.isfinite(x[i]) and x[i] &gt;= min_peak_mm]
+    if len(peak_idx) &lt; 2:
+        return result
+    for p1, p2 in zip(peak_idx[:-1], peak_idx[1:]):
+        if p2 &lt;= p1 + 1:
+            continue
+        peak1 = float(x[p1])
+        peak2 = float(x[p2])
+        valley = float(np.nanmin(x[p1:p2 + 1]))
+        lower_peak = min(peak1, peak2)
+        interpeak_drop = lower_peak - valley
+        if interpeak_drop &gt;= min_interpeak_drop_mm:
+            result.update({'suspect_multi_press': True, 'multi_peak1_idx_local': p1, 'multi_peak2_idx_local': p2, 'multi_peak1_mm': peak1, 'multi_peak2_mm': peak2, 'multi_valley_between_peaks_mm': valley, 'multi_interpeak_drop_from_lower_peak_mm': interpeak_drop})
+            return result
+    return result
+
+def detect_first_two_press_return_regions(df: pd.DataFrame, expected_count: int=EXPECTED_PRESS_COUNT, start_threshold_mm: float=START_THRESHOLD_MM, backoff_s: float=BACKOFF_S, min_excursion_mm: float=MIN_PRESS_EXCURSION_MM, min_duration_s: float=MIN_PRESS_DURATION_S, merge_gap_s: float=MERGE_GAP_S, smooth_window_s: float=SMOOTH_WINDOW_S) -&gt; Tuple[List[Tuple[int, int]], Dict[str, object], List[Dict[str, object]]]:
+    time_s = df['time[s]'].to_numpy(dtype=float)
+    disp = df['x[mm]'].to_numpy(dtype=float)
+    condi = df['Condi'].to_numpy(dtype=float)
+    dt = safe_median_dt(time_s)
+    if not np.isfinite(dt) or dt &lt;= 0:
+        baseline_info = {'baseline_mm': np.nan, 'baseline_method_mm': 'invalid_dt', 'condi_drop_start_idx': None, 'baseline_n_mm': 0}
+        return ([], baseline_info, [])
+    fs = 1.0 / dt
+    win = max(3, int(round(fs * smooth_window_s)))
+    disp_s = smooth_signal(disp, win)
+    valid = np.isfinite(disp_s)
+    if np.sum(valid) &lt; 5:
+        baseline_info = {'baseline_mm': np.nan, 'baseline_method_mm': 'not_enough_valid_disp', 'condi_drop_start_idx': None, 'baseline_n_mm': 0}
+        return ([], baseline_info, [])
+    baseline_mm, baseline_method_mm, condi_drop_start_idx, baseline_n_mm = compute_lower5_mean_baseline(signal=disp_s, condi=condi, percentile=BASELINE_PERCENTILE, fallback_to_global=FALLBACK_TO_GLOBAL_BASELINE)
+    baseline_info = {'baseline_mm': baseline_mm, 'baseline_method_mm': baseline_method_mm, 'condi_drop_start_idx': condi_drop_start_idx, 'baseline_n_mm': baseline_n_mm}
+    disp_rel = disp_s - baseline_mm
+    active = disp_rel &gt; start_threshold_mm
+    regions = contiguous_regions(active)
+    if not regions:
+        return ([], baseline_info, [])
+    gap_n = int(round(merge_gap_s / dt))
+    merged = merge_close_regions(regions, gap_n)
+    min_n = int(round(min_duration_s / dt))
+    backoff_n = int(round(backoff_s / dt))
+    valid_regions: List[Tuple[int, int, float]] = []
+    suspect_info_list: List[Dict[str, object]] = []
+    for s, e in merged:
+        if e - s + 1 &lt; min_n:
+            continue
+        seg = disp_rel[s:e + 1]
+        if np.sum(np.isfinite(seg)) &lt; 5:
+            continue
+        excursion = float(np.nanmax(seg) - np.nanmin(seg))
+        if excursion &lt; min_excursion_mm:
+            continue
+        s2 = max(0, s - backoff_n)
+        valid_regions.append((s2, e, excursion))
+        connected = detect_two_peaks_connected_in_region(seg)
+        multi_press = detect_multi_press_in_region(seg)
+        suspect_info_list.append({'RegionStartIndex_before_backoff': s, 'RegionStartIndex_after_backoff': s2, 'RegionEndIndex': e, 'RegionExcursion_mm': excursion, **connected, **multi_press, 'suspect_any': bool(connected.get('suspect_connected', False) or multi_press.get('suspect_multi_press', False))})
+    if not valid_regions:
+        return ([], baseline_info, suspect_info_list)
+    valid_regions = sorted(valid_regions, key=lambda x: x[0])[:expected_count]
+    return ([(s, e) for s, e, _ in valid_regions], baseline_info, suspect_info_list)
+</code></pre></details><p class="item-documentation"><a href="files/02_python/README.md" download>詳細（README）</a></p></article><article class="code-item" id="p3" aria-labelledby="p3-title"><div class="item-heading"><h2 id="p3-title">変位に応じた振動包絡線の解析</h2></div><p class="item-description">加速度波形からHilbert変換で振動の包絡線を求め，変位量に対する振幅の変化を比較できる形に整えるスクリプト。</p><figure class="code-figure"><a href="files/02_python/results/P3_full_research/full_acceleration_envelope_comparison.png" target="_blank" rel="noopener"><img src="files/02_python/results/P3_full_research/full_acceleration_envelope_comparison.png" alt="変位に応じた振動包絡線の解析の図" loading="lazy" decoding="async"></a><figcaption>押し込み量に対する振動包絡線の条件別比較。参加者内で試行を平均した後，参加者間で平均した結果（13名・339押込相）。 <a href="files/02_python/results/P3_full_research/full_acceleration_envelope_comparison.png" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><details class="code-disclosure" open><summary><span>コードを見る：envelope_math.py</span><span class="line-count">51行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/envelope_math.py</span><a href="files/02_python/src/portfolio_analysis/envelope_math.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="envelope_math.pyのソースコード"><code>&quot;&quot;&quot;加速度包絡線と変位補間。元のHilbert計算を維持。&quot;&quot;&quot;
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from scipy.signal import hilbert
+
+
+def compute_hilbert_envelope_mirror(x: np.ndarray, pad: int=100) -&gt; np.ndarray:
+    &quot;&quot;&quot;
+    ミラー拡張してから Hilbert を適用し、中央部のみ取り出す
+    &quot;&quot;&quot;
+    x = np.asarray(x, dtype=float)
+    valid = np.isfinite(x)
+    if np.sum(valid) &lt; 2:
+        return np.full_like(x, np.nan, dtype=float)
+    x_work = x.copy()
+    if not np.all(valid):
+        idx = np.arange(len(x_work))
+        x_work[~valid] = np.interp(idx[~valid], idx[valid], x_work[valid])
+    n = len(x_work)
+    pad = int(min(max(pad, 1), max(n - 1, 1)))
+    if n &lt; 3:
+        env = np.abs(hilbert(x_work))
+        env[~valid] = np.nan
+        return env
+    left = x_work[1:pad + 1][::-1]
+    right = x_work[-pad - 1:-1][::-1]
+    x_pad = np.r_[left, x_work, right]
+    env_pad = np.abs(hilbert(x_pad))
+    env = env_pad[pad:pad + n]
+    env[~valid] = np.nan
+    return env
+
+def interp_envelope_vs_displacement(disp: np.ndarray, env: np.ndarray, disp_common_raw: np.ndarray) -&gt; np.ndarray:
+    disp = np.asarray(disp, dtype=float)
+    env = np.asarray(env, dtype=float)
+    valid = np.isfinite(disp) &amp; np.isfinite(env)
+    if np.sum(valid) &lt; 2:
+        return np.full_like(disp_common_raw, np.nan, dtype=float)
+    disp_valid = disp[valid]
+    env_valid = env[valid]
+    df_tmp = pd.DataFrame({'disp': disp_valid, 'env': env_valid})
+    df_tmp = df_tmp.groupby('disp', as_index=False)['env'].mean().sort_values('disp')
+    disp_unique = df_tmp['disp'].to_numpy(dtype=float)
+    env_unique = df_tmp['env'].to_numpy(dtype=float)
+    if len(disp_unique) &lt; 2:
+        return np.full_like(disp_common_raw, np.nan, dtype=float)
+    y_interp = np.interp(disp_common_raw, disp_unique, env_unique)
+    y_interp[disp_common_raw &lt; disp_unique[0]] = np.nan
+    y_interp[disp_common_raw &gt; disp_unique[-1]] = np.nan
+    return y_interp
+</code></pre></details><p class="item-documentation"><a href="files/02_python/README.md" download>詳細（README）</a></p></article><section class="companion-section" aria-labelledby="companion-title"><h2 id="companion-title">関連するソースファイル</h2><p>各作例で使用する通信・計算・保存・作図処理。</p><details class="code-disclosure"><summary><span>関連コード：__init__.py</span><span class="line-count">1行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/__init__.py</span><a href="files/02_python/src/portfolio_analysis/__init__.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="__init__.pyのソースコード"><code>&quot;&quot;&quot;研究用コードの独立した表示・再実行用パッケージ。&quot;&quot;&quot;
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：cli.py</span><span class="line-count">33行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/cli.py</span><a href="files/02_python/src/portfolio_analysis/cli.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="cli.pyのソースコード"><code>&quot;&quot;&quot;CLI: 解析と装置なしデモを明示的なコマンドで実行。&quot;&quot;&quot;
+import argparse
+import json
+from pathlib import Path
+from .tcp_bridge import run_real
+from .workflows import run_envelopes, run_full_envelopes, run_segmentation, run_tcp_demo
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=&quot;研究コードの実データ抜粋解析とTCP mockデモ&quot;)
+    parser.add_argument(&quot;command&quot;, choices=[&quot;all&quot;, &quot;segments&quot;, &quot;envelopes&quot;, &quot;envelopes-full&quot;, &quot;tcp-demo&quot;, &quot;tcp-real&quot;])
+    parser.add_argument(&quot;--data&quot;, type=Path, default=Path(&quot;data&quot;))
+    parser.add_argument(&quot;--output&quot;, type=Path, default=Path(&quot;results&quot;))
+    parser.add_argument(&quot;--config&quot;, type=Path)
+    parser.add_argument(&quot;--duration&quot;, type=float, default=1.0)
+    args = parser.parse_args(argv)
+    if args.command == &quot;tcp-real&quot;:
+        if args.config is None or args.duration &lt;= 0:
+            parser.error(&quot;tcp-real requires --config and positive --duration&quot;)
+        run_real(args.config, args.duration)
+        return
+    result = {}
+    if args.command in (&quot;all&quot;, &quot;tcp-demo&quot;):
+        result[&quot;P1&quot;] = run_tcp_demo(args.output / &quot;P1_tcp_demo&quot;)
+    if args.command in (&quot;all&quot;, &quot;segments&quot;):
+        result[&quot;P2&quot;] = run_segmentation(args.data, args.output / &quot;P2_segments&quot;)
+    if args.command in (&quot;all&quot;, &quot;envelopes&quot;):
+        result[&quot;P3&quot;] = run_envelopes(args.data, args.output / &quot;P3_envelopes&quot;)
+    if args.command in (&quot;all&quot;, &quot;envelopes-full&quot;):
+        result[&quot;P3_full&quot;] = run_full_envelopes(args.data, args.output / &quot;P3_full_research&quot;)
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / &quot;run_report.json&quot;).write_text(json.dumps(result, indent=2), encoding=&quot;utf-8&quot;)
+    print(json.dumps(result, indent=2))
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：config.py</span><span class="line-count">13行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/config.py</span><a href="files/02_python/src/portfolio_analysis/config.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="config.pyのソースコード"><code>&quot;&quot;&quot;原研究コードの判定条件。変更せず分離。&quot;&quot;&quot;
+EXPECTED_PRESS_COUNT = 2
+START_THRESHOLD_MM = 5.0
+BACKOFF_S = 0.0
+MIN_PRESS_EXCURSION_MM = 10.0
+MIN_PRESS_DURATION_S = 0.2
+MERGE_GAP_S = 0.2
+SMOOTH_WINDOW_S = 0.02
+BASELINE_PERCENTILE = 5.0
+FALLBACK_TO_GLOBAL_BASELINE = True
+SUSPECT_MIN_PEAK_MM = 60.0
+SUSPECT_MIN_INTERPEAK_DROP_MM = 5.0
+SUSPECT_MAX_VALLEY_MM = 5.0
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：data_io.py</span><span class="line-count">20行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/data_io.py</span><a href="files/02_python/src/portfolio_analysis/data_io.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="data_io.pyのソースコード"><code>&quot;&quot;&quot;CSVを丸め直さず、Python floatのround-trip精度で読み込む。&quot;&quot;&quot;
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+
+def _number(text: str) -&gt; float:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def read_float_csv(path: Path, numeric_columns: list[str]) -&gt; pd.DataFrame:
+    raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    missing = set(numeric_columns) - set(raw)
+    if missing:
+        raise ValueError(f&quot;Missing columns: {sorted(missing)} in {path.name}&quot;)
+    numeric = set(numeric_columns)
+    return pd.DataFrame({name: raw[name].map(_number).to_numpy(dtype=float) if name in numeric else raw[name] for name in raw})
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：plots.py</span><span class="line-count">12行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/plots.py</span><a href="files/02_python/src/portfolio_analysis/plots.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="plots.pyのソースコード"><code>&quot;&quot;&quot;再生成用の静的PNG/SVG出力。&quot;&quot;&quot;
+from pathlib import Path
+import matplotlib
+matplotlib.use(&quot;Agg&quot;)
+import matplotlib.pyplot as plt
+
+
+def save_figure(fig, output: Path, stem: str):
+    output.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output / f&quot;{stem}.png&quot;, dpi=180, bbox_inches=&quot;tight&quot;)
+    fig.savefig(output / f&quot;{stem}.svg&quot;, bbox_inches=&quot;tight&quot;)
+    plt.close(fig)
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：signal_utils.py</span><span class="line-count">65行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/signal_utils.py</span><a href="files/02_python/src/portfolio_analysis/signal_utils.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="signal_utils.pyのソースコード"><code>&quot;&quot;&quot;時系列の平滑化・連続区間処理。原実装の計算順を維持。&quot;&quot;&quot;
+from __future__ import annotations
+from typing import List, Tuple, Optional, Dict
+import numpy as np
+
+
+def safe_median_dt(time_s: np.ndarray) -&gt; float:
+    time_s = np.asarray(time_s, dtype=float)
+    if len(time_s) &lt; 2:
+        return np.nan
+    dt = np.diff(time_s)
+    dt = dt[np.isfinite(dt) &amp; (dt &gt; 0)]
+    if len(dt) == 0:
+        return np.nan
+    return float(np.median(dt))
+
+def contiguous_regions(mask: np.ndarray) -&gt; List[Tuple[int, int]]:
+    if mask.size == 0:
+        return []
+    mask = mask.astype(bool)
+    diff = np.diff(mask.astype(int))
+    starts = list(np.where(diff == 1)[0] + 1)
+    ends = list(np.where(diff == -1)[0])
+    if mask[0]:
+        starts = [0] + starts
+    if mask[-1]:
+        ends = ends + [len(mask) - 1]
+    return list(zip(starts, ends))
+
+def merge_close_regions(regions: List[Tuple[int, int]], gap_max_samples: int) -&gt; List[Tuple[int, int]]:
+    if not regions:
+        return []
+    merged = [regions[0]]
+    for s, e in regions[1:]:
+        ps, pe = merged[-1]
+        if s - pe &lt;= gap_max_samples:
+            merged[-1] = (ps, e)
+        else:
+            merged.append((s, e))
+    return merged
+
+def smooth_signal(x: np.ndarray, window: int) -&gt; np.ndarray:
+    x = np.asarray(x, dtype=float)
+    if x.size == 0 or window &lt;= 1:
+        return x.copy()
+    pad = window // 2
+    x_pad = np.pad(x, pad_width=pad, mode='edge')
+    kernel = np.ones(window, dtype=float) / window
+    y = np.convolve(x_pad, kernel, mode='valid')
+    if len(y) != len(x):
+        y = y[:len(x)]
+    return y
+
+def find_local_peaks(signal: np.ndarray) -&gt; List[int]:
+    x = np.asarray(signal, dtype=float)
+    peaks = []
+    if len(x) &lt; 3:
+        return peaks
+    for i in range(1, len(x) - 1):
+        a, b, c = (x[i - 1], x[i], x[i + 1])
+        if not (np.isfinite(a) and np.isfinite(b) and np.isfinite(c)):
+            continue
+        if b &gt;= a and b &gt;= c:
+            peaks.append(i)
+    return peaks
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：workflows.py</span><span class="line-count">226行</span></summary><div class="file-toolbar"><span>02_python/src/portfolio_analysis/workflows.py</span><a href="files/02_python/src/portfolio_analysis/workflows.py" download>ダウンロード</a></div><pre tabindex="0" aria-label="workflows.pyのソースコード"><code>&quot;&quot;&quot;匿名入力を読み、元の計算条件で結果表と図を作る。&quot;&quot;&quot;
+from __future__ import annotations
+
+import json
+import math
+import socket
+import threading
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .config import SMOOTH_WINDOW_S, START_THRESHOLD_MM
+from .data_io import read_float_csv
+from .envelope_math import compute_hilbert_envelope_mirror, interp_envelope_vs_displacement
+from .plots import plt, save_figure
+from .segmentation import detect_first_two_press_return_regions
+from .signal_utils import safe_median_dt, smooth_signal
+from .tcp_bridge import CommandBuffer, exchange_once
+
+CONDITIONS = {9: &quot;Const-Low&quot;, 10: &quot;Const-High&quot;, 13: &quot;Env-F&quot;, 14: &quot;Env-xF&quot;}
+COLORS = {&quot;Const-Low&quot;: &quot;#4E9F3D&quot;, &quot;Const-High&quot;: &quot;#E69F00&quot;, &quot;Env-F&quot;: &quot;#D55E5E&quot;, &quot;Env-xF&quot;: &quot;#4C78A8&quot;}
+GRID_RAW = np.arange(5.0, 85.0 + 0.5 / 2, 0.5)
+
+
+def read_numeric(path: Path, columns: list[str]) -&gt; pd.DataFrame:
+    return read_float_csv(path, columns)[columns]
+
+
+def run_segmentation(data: Path, output: Path):
+    files = sorted((data / &quot;segmentation&quot;).glob(&quot;*.csv&quot;))
+    if not files:
+        raise FileNotFoundError(&quot;No segmentation CSV files&quot;)
+    output.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(len(files), 1, figsize=(10, 3.0 * len(files)), squeeze=False, layout=&quot;constrained&quot;)
+    rows = []
+    for ax, path in zip(axes[:, 0], files):
+        df = read_numeric(path, [&quot;time[s]&quot;, &quot;x[mm]&quot;, &quot;Condi&quot;]).dropna(subset=[&quot;time[s]&quot;, &quot;x[mm]&quot;]).reset_index(drop=True)
+        regions, base, suspects = detect_first_two_press_return_regions(df)
+        dt = safe_median_dt(df[&quot;time[s]&quot;].to_numpy())
+        smooth = smooth_signal(df[&quot;x[mm]&quot;].to_numpy(), max(3, int(round(SMOOTH_WINDOW_S / dt))))
+        relative = smooth - base[&quot;baseline_mm&quot;]
+        t = df[&quot;time[s]&quot;].to_numpy()
+        ax.plot(t, relative, color=&quot;#1D4E89&quot;, lw=1.2, label=&quot;Smoothed displacement - baseline&quot;)
+        ax.axhline(START_THRESHOLD_MM, color=&quot;#666666&quot;, ls=&quot;--&quot;, lw=0.8, label=&quot;5 mm threshold&quot;)
+        for number, (start, end) in enumerate(regions, 1):
+            ax.axvspan(t[start], t[end], color=&quot;#e6a23c&quot;, alpha=0.28, label=&quot;Detected region&quot; if number == 1 else None)
+            suspect = bool(suspects[number - 1][&quot;suspect_any&quot;]) if number &lt;= len(suspects) else False
+            rows.append({&quot;trial&quot;: path.stem, &quot;region&quot;: number, &quot;start_index&quot;: int(start), &quot;end_index&quot;: int(end), &quot;start_time_s&quot;: t[start], &quot;end_time_s&quot;: t[end], &quot;baseline_mm&quot;: base[&quot;baseline_mm&quot;], &quot;baseline_method&quot;: base[&quot;baseline_method_mm&quot;], &quot;suspect&quot;: suspect})
+        ax.set(title=f&quot;{path.stem}: {len(regions)} detected regions&quot;, xlabel=&quot;Measurement time [s]&quot;, ylabel=&quot;Displacement [mm]&quot;)
+        ax.legend(loc=&quot;upper right&quot;, fontsize=8)
+        ax.grid(alpha=0.2)
+    fig.suptitle(&quot;Real-data excerpt: three trials / one anonymized participant\nOriginal thresholds and smoothing retained; not the full study&quot;, fontsize=12)
+    save_figure(fig, output, &quot;detected_press_return_regions&quot;)
+    pd.DataFrame(rows).to_csv(output / &quot;regions.csv&quot;, index=False)
+    return {&quot;kind&quot;: &quot;real_data_excerpt&quot;, &quot;trials&quot;: len(files), &quot;regions&quot;: len(rows), &quot;output&quot;: str(output)}
+
+
+def process_envelope(path: Path):
+    frame = read_numeric(path, [&quot;time[s]&quot;, &quot;x[mm]&quot;, &quot;acc_high(80-120Hz)&quot;, &quot;Condi&quot;])
+    code = frame[&quot;Condi&quot;].dropna().astype(int)
+    code = code[code != 0]
+    condition = CONDITIONS.get(int(code.mode().iloc[0])) if len(code) else None
+    if condition is None:
+        return None
+    disp = frame[&quot;x[mm]&quot;].to_numpy(dtype=float)
+    # 原コードの補正係数。既存の列名はm/s^2を示すが値は元処理のまま。
+    acc = frame[&quot;acc_high(80-120Hz)&quot;].to_numpy(dtype=float) / 0.102
+    valid = np.isfinite(disp) &amp; np.isfinite(acc)
+    disp, acc = disp[valid], acc[valid]
+    time_s = frame[&quot;time[s]&quot;].to_numpy(dtype=float)[valid]
+    if len(disp) &lt; 3 or float(np.nanmax(disp)) &lt; 84.0:
+        return None
+    env = compute_hilbert_envelope_mirror(acc, pad=100)
+    mask = (disp &gt;= 5.0) &amp; (disp &lt;= 85.0) &amp; np.isfinite(env)
+    if np.sum(mask) &lt; 3:
+        return None
+    curve = interp_envelope_vs_displacement(disp[mask], env[mask], GRID_RAW)
+    return {&quot;participant&quot;: path.parent.name, &quot;condition&quot;: condition, &quot;curve&quot;: curve, &quot;time_s&quot;: time_s, &quot;acc&quot;: acc, &quot;envelope&quot;: env}
+
+
+def run_envelopes(data: Path, output: Path):
+    files = sorted((data / &quot;envelope&quot;).glob(&quot;*/*.csv&quot;))
+    records = [r for p in files if (r := process_envelope(p)) is not None]
+    if not records:
+        raise ValueError(&quot;No eligible envelope trials&quot;)
+    output.mkdir(parents=True, exist_ok=True)
+    columns = [f&quot;disp_{d:.1f}&quot; for d in GRID_RAW - 5.0]
+    rows = [{&quot;participant&quot;: r[&quot;participant&quot;], &quot;condition&quot;: r[&quot;condition&quot;], **dict(zip(columns, r[&quot;curve&quot;]))} for r in records]
+    trial = pd.DataFrame(rows)
+    person = trial.groupby([&quot;participant&quot;, &quot;condition&quot;], as_index=False)[columns].mean()
+    group = person.groupby(&quot;condition&quot;, as_index=False)[columns].mean()
+    counts = person.groupby(&quot;condition&quot;, as_index=False)[&quot;participant&quot;].nunique()
+    trial.to_csv(output / &quot;trial_curves.csv&quot;, index=False)
+    person.to_csv(output / &quot;participant_means.csv&quot;, index=False)
+    group.to_csv(output / &quot;condition_means.csv&quot;, index=False)
+    counts.to_csv(output / &quot;participant_counts.csv&quot;, index=False)
+    fig, ax = plt.subplots(figsize=(9, 5.2), layout=&quot;constrained&quot;)
+    for condition in CONDITIONS.values():
+        row = group[group[&quot;condition&quot;] == condition]
+        if row.empty:
+            continue
+        n = int(counts.loc[counts[&quot;condition&quot;] == condition, &quot;participant&quot;].iloc[0])
+        ax.plot(GRID_RAW - 5.0, row[columns].iloc[0].to_numpy(), color=COLORS[condition], lw=2.2, label=f&quot;{condition} (n={n})&quot;)
+    ax.set(title=&quot;Real-data excerpt: Hilbert envelopes by condition\nParticipant means, then condition means; not the full study&quot;, xlabel=&quot;Corrected displacement [mm]&quot;, ylabel=&quot;Envelope amplitude [original scale / 0.102]&quot;, xlim=(0, 80))
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.2)
+    save_figure(fig, output, &quot;acceleration_envelope_comparison&quot;)
+    example = records[0]
+    fig, ax = plt.subplots(figsize=(9, 4.2), layout=&quot;constrained&quot;)
+    t = example[&quot;time_s&quot;] - example[&quot;time_s&quot;][0]
+    ax.plot(t, example[&quot;acc&quot;], color=&quot;#9bb5ca&quot;, lw=0.8, label=&quot;Band-passed acceleration / 0.102&quot;)
+    ax.plot(t, example[&quot;envelope&quot;], color=&quot;#D55E5E&quot;, lw=1.5, label=&quot;Recomputed Hilbert envelope&quot;)
+    ax.set(title=f&quot;Real measured excerpt: {example['participant']} / {example['condition']}&quot;, xlabel=&quot;Elapsed time within supplied phase [s]&quot;, ylabel=&quot;Amplitude [original scale / 0.102]&quot;)
+    ax.legend(fontsize=8)
+    save_figure(fig, output, &quot;signal_and_recomputed_envelope&quot;)
+    return {&quot;kind&quot;: &quot;real_data_excerpt&quot;, &quot;trials&quot;: len(records), &quot;participants&quot;: int(person[&quot;participant&quot;].nunique()), &quot;output&quot;: str(output)}
+
+
+def run_full_envelopes(data: Path, output: Path):
+    &quot;&quot;&quot;元対象全体の再計算済み匿名中間値から、条件平均を再現する。&quot;&quot;&quot;
+    source = data / &quot;envelope_full&quot;
+    metadata = json.loads((source / &quot;metadata.json&quot;).read_text(encoding=&quot;utf-8&quot;))
+    columns = [f&quot;disp_{d:.1f}&quot; for d in GRID_RAW - 5.0]
+    trial = read_float_csv(source / &quot;trial_curves.csv.gz&quot;, columns)
+    # 参加者ごとの試行数に偏りがあっても等重みになる元の二段階平均。
+    person = trial.groupby([&quot;Participant&quot;, &quot;Condition&quot;])[columns].mean().reset_index()
+    group = person.groupby(&quot;Condition&quot;)[columns].mean().reset_index()
+    counts = person.groupby(&quot;Condition&quot;)[&quot;Participant&quot;].nunique()
+    output.mkdir(parents=True, exist_ok=True)
+    group.to_csv(output / &quot;full_condition_means.csv&quot;, index=False)
+    person.to_csv(output / &quot;full_participant_means.csv&quot;, index=False)
+    fig, ax = plt.subplots(figsize=(9, 5.7), layout=&quot;constrained&quot;)
+    for condition in CONDITIONS.values():
+        values = group.loc[group[&quot;Condition&quot;] == condition, columns].iloc[0].to_numpy(float)
+        ax.plot(GRID_RAW - 5.0, values, lw=2.5, color=COLORS[condition], label=f&quot;{condition} (n={int(counts[condition])})&quot;)
+    ax.set(title=f&quot;Full original analysis set: {metadata['unique_participants']} participants / {metadata['included_phases']} press phases\nHilbert envelope, averaged within participant then across participants&quot;, xlabel=&quot;Corrected displacement [mm]&quot;, ylabel=&quot;Envelope amplitude [original scale / 0.102]&quot;, xlim=(0, 80))
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.2)
+    save_figure(fig, output, &quot;full_acceleration_envelope_comparison&quot;)
+    return {&quot;kind&quot;: &quot;full_original_analysis&quot;, &quot;included_phases&quot;: metadata[&quot;included_phases&quot;], &quot;unique_participants&quot;: metadata[&quot;unique_participants&quot;], &quot;participants_by_condition&quot;: metadata[&quot;participants_by_condition&quot;], &quot;aggregation_input&quot;: &quot;anonymized trial-level interpolated curves recomputed from original measured signals&quot;}
+
+
+class MockDevice:
+    def __init__(self):
+        self.index = 0
+        self.command = (0.0, 0.0)
+
+    def read_pair(self):
+        t = self.index * 0.01
+        self.index += 1
+        return 40 + 30 * math.sin(t * 3), 35 + 20 * math.cos(t * 3)
+
+    def write_pair(self, pair):
+        self.command = pair
+
+    def close(self):
+        pass
+
+
+def run_tcp_demo(output: Path, samples: int = 120):
+    &quot;&quot;&quot;localhost上で本物のTCPを使うが、センサ・指令は合成値。&quot;&quot;&quot;
+    output.mkdir(parents=True, exist_ok=True)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((&quot;127.0.0.1&quot;, 0))
+    server.listen(1)
+    errors = []
+
+    def mock_unity():
+        try:
+            with server.accept()[0] as peer:
+                pending = &quot;&quot;
+                count = 0
+                while count &lt; samples:
+                    chunk = peer.recv(4096)
+                    if not chunk:
+                        break
+                    pending += chunk.decode(&quot;utf-8&quot;)
+                    while &quot;\n&quot; in pending:
+                        line, pending = pending.split(&quot;\n&quot;, 1)
+                        a, b = map(float, line.split(&quot;,&quot;))
+                        response = f&quot;{a / 80:.6f},{b / 80:.6f}\n&quot;.encode()
+                        midpoint = len(response) // 2
+                        peer.sendall(response[:midpoint])
+                        peer.sendall(response[midpoint:])
+                        count += 1
+        except Exception as exc:
+            errors.append(str(exc))
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=mock_unity, daemon=True)
+    thread.start()
+    rows = []
+    device = MockDevice()
+    with socket.create_connection(server.getsockname(), timeout=2.0) as client:
+        client.settimeout(0.1)
+        parser = CommandBuffer()
+        for i in range(samples):
+            values, command = exchange_once(client, device, parser)
+            # デモは各要求の応答を読み切る。実機ループの周期を模倣しない。
+            while command is None:
+                chunk = client.recv(4096)
+                if not chunk:
+                    raise ConnectionError(&quot;Mock peer closed before a complete response&quot;)
+                command = parser.feed(chunk)
+                if command is not None:
+                    device.write_pair(command)
+            rows.append({&quot;sample&quot;: i, &quot;synthetic_time_s&quot;: i * 0.01, &quot;mock_position_1&quot;: values[0], &quot;mock_position_2&quot;: values[1], &quot;mock_command_1&quot;: device.command[0], &quot;mock_command_2&quot;: device.command[1], &quot;command_received_this_step&quot;: command is not None})
+    thread.join(timeout=3.0)
+    if thread.is_alive() or errors:
+        raise RuntimeError(f&quot;Loopback server failed: {errors}&quot;)
+    df = pd.DataFrame(rows)
+    df.to_csv(output / &quot;mock_tcp_trace.csv&quot;, index=False)
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True, layout=&quot;constrained&quot;)
+    axes[0].plot(df[&quot;sample&quot;], df[&quot;mock_position_1&quot;], label=&quot;Mock sensor 1&quot;)
+    axes[0].plot(df[&quot;sample&quot;], df[&quot;mock_position_2&quot;], label=&quot;Mock sensor 2&quot;)
+    axes[0].set(ylabel=&quot;Synthetic displacement&quot;, title=&quot;MOCK ONLY: local TCP exchange, no dSPACE hardware&quot;)
+    axes[1].plot(df[&quot;sample&quot;], df[&quot;mock_command_1&quot;], label=&quot;Mock command 1&quot;)
+    axes[1].plot(df[&quot;sample&quot;], df[&quot;mock_command_2&quot;], label=&quot;Mock command 2&quot;)
+    axes[1].set(xlabel=&quot;Exchange step (not measured real-time rate)&quot;, ylabel=&quot;Synthetic command&quot;)
+    for ax in axes:
+        ax.legend()
+        ax.grid(alpha=0.2)
+    save_figure(fig, output, &quot;mock_tcp_exchange&quot;)
+    return {&quot;kind&quot;: &quot;synthetic_device_with_real_loopback_tcp&quot;, &quot;exchanges&quot;: samples, &quot;received_commands&quot;: int(df[&quot;command_received_this_step&quot;].sum()), &quot;hardware_verified&quot;: False}
+</code></pre></details></section><p class="back-bottom"><a href="../index.html#skills">← ホームページの使用技術へ戻る</a></p></main><footer class="site-footer page-width"><p>妻鹿 成紘 / Naruhiro Mega</p><p><a href="../index.html">研究ポートフォリオ</a><a href="../index.html#contact">お問い合わせ</a></p></footer></body></html>

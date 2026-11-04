@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="M5Atomによる振動提示のコードと、講義で班製作した体重計の資料を紹介します。"><title>Arduino / C++のコード・成果物｜妻鹿成紘</title><link rel="icon" href="data:,"><link rel="stylesheet" href="../assets/style.css"><link rel="stylesheet" href="../assets/code.css"></head>
+<body class="code-page"><a class="skip-link" href="#main">本文へ移動</a><header class="site-header"><div class="header-inner"><a class="site-title" href="../index.html">妻鹿成紘の研究ポートフォリオ</a><a class="back-home" href="../index.html#skills">← 使用技術へ戻る</a></div></header>
+<main id="main" class="page-width" tabindex="-1"><div class="code-intro"><p class="code-eyebrow">コード・成果物</p><h1>Arduino / C++</h1></div><nav class="category-nav" aria-label="使用技術のカテゴリ"><a href="unity.html">Unity / C#</a><a href="python.html">Python</a><a href="r.html">R</a><a href="arduino.html" aria-current="page">Arduino / C++</a><a href="cad.html">Fusion / 3Dプリンタ</a></nav><article class="code-item" id="a1" aria-labelledby="a1-title"><div class="item-heading"><h2 id="a1-title">ボタン操作による振動提示</h2></div><p class="item-description">M5Atomのボタン操作で振動のON/OFFと周波数（160 Hz・500 Hz）を切り替え，I2Sで振動提示用の信号を出力するプログラム。</p><details class="code-disclosure" open><summary><span>コードを見る：A1_ManualDemo.ino</span><span class="line-count">36行</span></summary><div class="file-toolbar"><span>04_arduino/A1_ManualDemo/A1_ManualDemo.ino</span><a href="files/04_arduino/A1_ManualDemo/A1_ManualDemo.ino" download>ダウンロード</a></div><pre tabindex="0" aria-label="A1_ManualDemo.inoのソースコード"><code>#include &lt;M5Atom.h&gt;
+#include &lt;PortfolioHaptics.h&gt;
+#include &lt;I2sOutput.h&gt;
+
+portfolio::ManualController controller;
+portfolio::I2sOutput output;
+int16_t samples[portfolio::kBufferSamples];
+bool outputReady = false;
+
+const uint8_t digits[2][25] = {
+    {0,0,1,0,0, 0,1,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,1,1,1,0},
+    {0,1,1,1,0, 0,0,0,1,0, 0,1,1,1,0, 0,1,0,0,0, 0,1,1,1,0}
+};
+
+void showState() {
+    const uint32_t color = controller.vibrating() ? 0xff0000 : 0x00ff00;
+    for (int i = 0; i &lt; 25; ++i)
+        M5.dis.drawpix(i, digits[controller.mode() - 1][i] ? color : 0);
+}
+
+void setup() {
+    M5.begin(true, false, true);
+    Serial.begin(115200);
+    outputReady = output.begin(I2S_CHANNEL_FMT_RIGHT_LEFT);
+    if (outputReady) showState();
+    else M5.dis.fillpix(0xff00ff); // I2S障害
+}
+
+void loop() {
+    M5.update();
+    if (!outputReady) { delay(10); return; }
+    if (controller.update(millis(), M5.Btn.wasPressed())) showState();
+    controller.render(samples, portfolio::kBufferSamples);
+    outputReady = output.write(samples, portfolio::kBufferSamples);
+    if (!outputReady) M5.dis.fillpix(0xff00ff);
+}
+</code></pre></details><p class="item-documentation"><a href="files/04_arduino/A1_ManualDemo/README.md" download>詳細（README）</a></p></article><article class="code-item" id="a2" aria-labelledby="a2-title"><div class="item-heading"><h2 id="a2-title">VR内の接触・速度に連動する振動提示</h2></div><p class="item-description">Unityからシリアル通信で受け取る指令値に応じて振動の強さを調整し，接触時には短い振動を提示するプログラム。</p><details class="code-disclosure" open><summary><span>コードを見る：A2_SerialSpeed.ino</span><span class="line-count">42行</span></summary><div class="file-toolbar"><span>04_arduino/A2_SerialSpeed/A2_SerialSpeed.ino</span><a href="files/04_arduino/A2_SerialSpeed/A2_SerialSpeed.ino" download>ダウンロード</a></div><pre tabindex="0" aria-label="A2_SerialSpeed.inoのソースコード"><code>#include &lt;M5Atom.h&gt;
+#include &lt;PortfolioHaptics.h&gt;
+#include &lt;I2sOutput.h&gt;
+
+portfolio::VelocityController controller;
+portfolio::SerialLevelParser parser;
+portfolio::I2sOutput output;
+int16_t samples[portfolio::kBufferSamples];
+bool outputReady = false;
+const uint8_t ledPositions[13][2] = {
+    {0,0},{1,0},{2,0},{3,0},{4,0},
+    {4,1},{3,1},{2,1},{1,1},{0,1},{0,2},{1,2},{2,2}
+};
+
+void showLevel(int level) {
+    M5.dis.clear();
+    for (int i = 0; i &lt; level; ++i)
+        M5.dis.drawpix(ledPositions[i][0], ledPositions[i][1], CRGB(0, 80, 0));
+}
+
+void setup() {
+    M5.begin(true, false, true);
+    Serial.begin(115200);
+    M5.dis.clear();
+    M5.dis.setBrightness(20);
+    // 原本のALL_RIGHTを維持。実際のDACのチャンネル・サンプル周期は実機確認が必要。
+    outputReady = output.begin(I2S_CHANNEL_FMT_ALL_RIGHT);
+    if (!outputReady) M5.dis.fillpix(0xff00ff);
+}
+
+void loop() {
+    M5.update();
+    if (!outputReady) { delay(10); return; }
+    while (Serial.available() &gt; 0) {
+        int level = 0;
+        if (parser.push(static_cast&lt;char&gt;(Serial.read()), level) &amp;&amp; controller.setLevel(level, millis()))
+            showLevel(level);
+    }
+    controller.render(samples, portfolio::kBufferSamples, millis());
+    outputReady = output.write(samples, portfolio::kBufferSamples);
+    if (!outputReady) M5.dis.fillpix(0xff00ff);
+}
+</code></pre></details><p class="item-documentation"><a href="files/04_arduino/A2_SerialSpeed/README.md" download>詳細（README）</a></p></article><article class="code-item" id="a3" aria-labelledby="a3-title"><div class="item-heading"><h2 id="a3-title">ひずみゲージ式体重計の製作</h2></div><p class="item-description">竹製梁のひずみから重量を算出し，LEDに2進数で表示する体重計。班製作でデジタル機構を担当。</p><figure class="code-figure"><a href="files/04_arduino/A3_ScaleArtifact/%E4%BD%93%E9%87%8D%E8%A8%88%E5%A4%96%E8%A6%B3.jpg" target="_blank" rel="noopener"><img src="files/04_arduino/A3_ScaleArtifact/%E4%BD%93%E9%87%8D%E8%A8%88%E5%A4%96%E8%A6%B3.jpg" alt="ひずみゲージ式体重計の製作の外観写真" loading="lazy" decoding="async"></a><figcaption>班製作した体重計の外観。 <a href="files/04_arduino/A3_ScaleArtifact/%E4%BD%93%E9%87%8D%E8%A8%88%E5%A4%96%E8%A6%B3.jpg" target="_blank" rel="noopener">画像を拡大</a></figcaption></figure><div class="asset-primary"><a class="asset-button" href="files/04_arduino/A3_ScaleArtifact/SDGs%E4%BD%93%E9%87%8D%E8%A8%88_%E6%A6%82%E8%A6%81%E3%83%BBCAD%E3%83%BB%E5%AE%9F%E6%A9%9F%E5%86%99%E7%9C%9F%E8%B3%87%E6%96%99.pdf" target="_blank" rel="noopener">概要PDFを見る <span aria-hidden="true">↗</span></a></div><div class="asset-list"><h3>関連資料・モデル</h3><ul><li><a href="files/04_arduino/A3_ScaleArtifact/%E4%BD%93%E9%87%8D%E8%A8%88%E5%86%85%E9%83%A8.jpg" target="_blank" rel="noopener">体重計内部.jpg</a></li></ul></div><p class="item-documentation"><a href="files/04_arduino/A3_ScaleArtifact/README.md" download>詳細（README）</a></p></article><section class="companion-section" aria-labelledby="companion-title"><h2 id="companion-title">関連するソースファイル</h2><p>各作例で使用する通信・計算・保存・作図処理。</p><details class="code-disclosure"><summary><span>関連コード：I2sOutput.h</span><span class="line-count">57行</span></summary><div class="file-toolbar"><span>04_arduino/libraries/PortfolioHaptics/src/I2sOutput.h</span><a href="files/04_arduino/libraries/PortfolioHaptics/src/I2sOutput.h" download>ダウンロード</a></div><pre tabindex="0" aria-label="I2sOutput.hのソースコード"><code>#pragma once
+#include &lt;Arduino.h&gt;
+#include &lt;driver/i2s.h&gt;
+#include &quot;PortfolioHaptics.h&quot;
+
+namespace portfolio {
+// 原本と同じBCK=19, WS=33, DOUT=22, DIN=23。実配線はREADME参照。
+class I2sOutput {
+public:
+    bool begin(i2s_channel_fmt_t channels) {
+        i2s_driver_uninstall(I2S_NUM_0); // 未導入ならESP_ERR_INVALID_STATE。旧実装と同じ所有前提。
+        i2s_config_t config = {};
+        config.mode = static_cast&lt;i2s_mode_t&gt;(I2S_MODE_MASTER | I2S_MODE_TX);
+        config.sample_rate = kSampleRate;
+        config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+        config.channel_format = channels;
+        config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+        config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+        config.dma_buf_count = 8;
+        config.dma_buf_len = 256;
+        config.use_apll = false;
+        config.tx_desc_auto_clear = true;
+        esp_err_t error = i2s_driver_install(I2S_NUM_0, &amp;config, 0, nullptr);
+        if (error != ESP_OK) return fail(&quot;install&quot;, error);
+        installed_ = true;
+        i2s_pin_config_t pins = {};
+        pins.mck_io_num = I2S_PIN_NO_CHANGE;
+        pins.bck_io_num = 19;
+        pins.ws_io_num = 33;
+        pins.data_out_num = 22;
+        pins.data_in_num = 23;
+        error = i2s_set_pin(I2S_NUM_0, &amp;pins);
+        if (error != ESP_OK) return fail(&quot;pins&quot;, error);
+        error = i2s_zero_dma_buffer(I2S_NUM_0);
+        if (error != ESP_OK) return fail(&quot;zero buffer&quot;, error);
+        ready_ = true;
+        return true;
+    }
+
+    bool write(const int16_t* samples, std::size_t count) {
+        if (!ready_) return false;
+        const std::size_t bytes = count * sizeof(int16_t);
+        std::size_t written = 0;
+        const esp_err_t error = i2s_write(I2S_NUM_0, samples, bytes, &amp;written, pdMS_TO_TICKS(100));
+        if (error != ESP_OK || written != bytes) return fail(&quot;write / short write&quot;, error);
+        return true;
+    }
+private:
+    bool installed_ = false, ready_ = false;
+    bool fail(const char* operation, esp_err_t error) {
+        Serial.printf(&quot;I2S %s failed: %s\n&quot;, operation, esp_err_to_name(error));
+        ready_ = false;
+        if (installed_) { i2s_driver_uninstall(I2S_NUM_0); installed_ = false; }
+        return false;
+    }
+};
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：PortfolioHaptics.h</span><span class="line-count">136行</span></summary><div class="file-toolbar"><span>04_arduino/libraries/PortfolioHaptics/src/PortfolioHaptics.h</span><a href="files/04_arduino/libraries/PortfolioHaptics/src/PortfolioHaptics.h" download>ダウンロード</a></div><pre tabindex="0" aria-label="PortfolioHaptics.hのソースコード"><code>#pragma once
+#include &lt;cmath&gt;
+#include &lt;cstddef&gt;
+#include &lt;cstdint&gt;
+#include &lt;cstring&gt;
+
+namespace portfolio {
+constexpr double kPi = 3.14159265358979323846;
+constexpr uint32_t kSampleRate = 44100;
+constexpr std::size_t kBufferSamples = 256;
+constexpr int16_t kMaxAmplitude = 32767;
+
+// 位相はバッファ間・モード変更間で連続。無音時に位相を止めるA1の仕様を維持。
+class SineOscillator {
+public:
+    void render(int16_t* samples, std::size_t count, double frequency,
+                double amplitude, bool stereoPairs = false, bool freezeWhenSilent = false) {
+        if (amplitude == 0 &amp;&amp; freezeWhenSilent) {
+            std::memset(samples, 0, count * sizeof(int16_t));
+            return;
+        }
+        const double increment = frequency * 2.0 * kPi / kSampleRate;
+        const std::size_t stride = stereoPairs ? 2 : 1;
+        for (std::size_t i = 0; i &lt; count; i += stride) {
+            const auto sample = static_cast&lt;int16_t&gt;(amplitude * std::sin(phase_));
+            samples[i] = sample;
+            if (stereoPairs &amp;&amp; i + 1 &lt; count) samples[i + 1] = sample;
+            phase_ += increment;
+        }
+        while (phase_ &gt;= 2.0 * kPi) phase_ -= 2.0 * kPi;
+    }
+private:
+    double phase_ = 0;
+};
+
+class ManualController {
+public:
+    static constexpr uint32_t kDoubleClickMs = 300;
+    // 修正: 判定期限後の2回目を誤ってダブルクリック扱いしない。
+    bool update(uint32_t now, bool pressed) {
+        bool changed = false;
+        if (pending_ &amp;&amp; elapsed(now, firstClick_) &gt; kDoubleClickMs) {
+            pending_ = false;
+            vibrating_ = !vibrating_;
+            changed = true;
+        }
+        if (pressed) {
+            if (pending_) {
+                pending_ = false;
+                mode_ = mode_ == 1 ? 2 : 1;
+                changed = true;
+            } else {
+                pending_ = true;
+                firstClick_ = now;
+            }
+        }
+        return changed;
+    }
+    int mode() const { return mode_; }
+    bool vibrating() const { return vibrating_; }
+    double frequency() const { return mode_ == 1 ? 160.0 : 500.0; }
+    void render(int16_t* samples, std::size_t count) {
+        oscillator_.render(samples, count, frequency(), vibrating_ ? kMaxAmplitude : 0, true, true);
+    }
+private:
+    static uint32_t elapsed(uint32_t now, uint32_t since) { return now - since; }
+    int mode_ = 1;
+    bool vibrating_ = false, pending_ = false;
+    uint32_t firstClick_ = 0;
+    SineOscillator oscillator_;
+};
+
+// 改行を区切りとする0〜13プロトコル。範囲外の正数は13に制限する。
+// 修正: &quot;-1&quot;や不正文字列を&quot;1&quot;として受理しない。入力バッファの無制限成長を防ぐ。
+class SerialLevelParser {
+public:
+    bool push(char c, int&amp; result) {
+        if (c == '\r') return false;
+        if (c == '\n') {
+            const bool valid = digits_ &gt; 0 &amp;&amp; !invalid_;
+            if (valid) result = value_ &gt; 13 ? 13 : value_;
+            digits_ = 0; value_ = 0; invalid_ = false;
+            return valid;
+        }
+        if (c &lt; '0' || c &gt; '9' || digits_ &gt;= 6) { invalid_ = true; return false; }
+        ++digits_;
+        value_ = value_ * 10 + (c - '0');
+        return false;
+    }
+private:
+    int value_ = 0;
+    unsigned digits_ = 0;
+    bool invalid_ = false;
+};
+
+class VelocityController {
+public:
+    static constexpr int kMaxLevel = 13;
+    static constexpr double kNormalHz = 250.0, kContactHz = 65.0;
+    static constexpr uint32_t kContactMs = 100;
+    static constexpr int kContactAmplitude = 30000;
+    static constexpr double kFadeIn = 0.05, kFadeOut = 0.05;
+
+    bool setLevel(int level, uint32_t now) {
+        level = level &lt; 0 ? 0 : level &gt; kMaxLevel ? kMaxLevel : level;
+        if (level == level_) return false;
+        level_ = level;
+        contact_ = level == 1;
+        if (contact_) contactStart_ = now;
+        // Arduino map()の整数除算を維持。
+        targetAmplitude_ = level * static_cast&lt;int&gt;(kMaxAmplitude) / kMaxLevel;
+        return true;
+    }
+    void render(int16_t* samples, std::size_t count, uint32_t now) {
+        if (contact_ &amp;&amp; static_cast&lt;uint32_t&gt;(now - contactStart_) &gt;= kContactMs) contact_ = false;
+        if (contact_) {
+            contactOscillator_.render(samples, count, kContactHz, kContactAmplitude);
+            return;
+        }
+        const double factor = targetAmplitude_ &gt; currentAmplitude_ ? kFadeIn : kFadeOut;
+        // 元コードと同じ1バッファにつき1回のフェード。
+        currentAmplitude_ += (targetAmplitude_ - currentAmplitude_) * factor;
+        normalOscillator_.render(samples, count, kNormalHz, currentAmplitude_);
+    }
+    int level() const { return level_; }
+    bool contactActive() const { return contact_; }
+    double amplitude() const { return currentAmplitude_; }
+    double targetAmplitude() const { return targetAmplitude_; }
+private:
+    int level_ = -1;
+    bool contact_ = false;
+    uint32_t contactStart_ = 0;
+    double targetAmplitude_ = 0, currentAmplitude_ = 0;
+    SineOscillator normalOscillator_, contactOscillator_;
+};
+}
+</code></pre></details></section><p class="back-bottom"><a href="../index.html#skills">← ホームページの使用技術へ戻る</a></p></main><footer class="site-footer page-width"><p>妻鹿 成紘 / Naruhiro Mega</p><p><a href="../index.html">研究ポートフォリオ</a><a href="../index.html#contact">お問い合わせ</a></p></footer></body></html>

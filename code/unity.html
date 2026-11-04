@@ -1,0 +1,1395 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="VR実験で用いる位置・姿勢計測、実機変位に連動する表示、条件提示と回答保存のコードを紹介します。"><title>Unity / C#のコード・成果物｜妻鹿成紘</title><link rel="icon" href="data:,"><link rel="stylesheet" href="../assets/style.css"><link rel="stylesheet" href="../assets/code.css"></head>
+<body class="code-page"><a class="skip-link" href="#main">本文へ移動</a><header class="site-header"><div class="header-inner"><a class="site-title" href="../index.html">妻鹿成紘の研究ポートフォリオ</a><a class="back-home" href="../index.html#skills">← 使用技術へ戻る</a></div></header>
+<main id="main" class="page-width" tabindex="-1"><div class="code-intro"><p class="code-eyebrow">コード・成果物</p><h1>Unity / C#</h1></div><nav class="category-nav" aria-label="使用技術のカテゴリ"><a href="unity.html" aria-current="page">Unity / C#</a><a href="python.html">Python</a><a href="r.html">R</a><a href="arduino.html">Arduino / C++</a><a href="cad.html">Fusion / 3Dプリンタ</a></nav><article class="code-item" id="u1" aria-labelledby="u1-title"><div class="item-heading"><h2 id="u1-title">研磨面に対する工具の位置・姿勢計測</h2></div><p class="item-description">研磨工具の位置・姿勢を研磨面基準の座標に変換し，面への侵入量と接触状態を取得するスクリプト。</p><details class="code-disclosure" open><summary><span>コードを見る：RelativePoseProvider.cs</span><span class="line-count">57行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U1_Pose/RelativePoseProvider.cs</span><a href="files/01_unity/Runtime/U1_Pose/RelativePoseProvider.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="RelativePoseProvider.csのソースコード"><code>using UnityEngine;
+
+namespace Portfolio.Research
+{
+    /// &lt;summary&gt;研磨面を基準とした表示点・入力点を取得する掲載用サンプル。&lt;/summary&gt;
+    public sealed class RelativePoseProvider : MonoBehaviour
+    {
+        [SerializeField] private Transform origin;
+        [SerializeField] private Transform visualPoint;
+        [SerializeField] private Transform rawPoint;
+        [SerializeField] private ContactFlag contact;
+        [SerializeField, Min(1)] private int sampleRateHz = 100;
+        [SerializeField] private float positionScale = 1000f;
+        [SerializeField] private SurfaceAxis normalAxis = SurfaceAxis.Y;
+        [SerializeField] private bool penetrationWhenNegative = true;
+
+        private readonly object sampleLock = new object();
+        private PoseSample latest;
+        private bool hasSample;
+        private float nextSampleTime;
+        private long sampleIndex;
+
+        public void SetRawPoint(Transform point) =&gt; rawPoint = point;
+        private void Start() =&gt; nextSampleTime = Time.unscaledTime;
+
+        private void Update()
+        {
+            if (sampleRateHz &lt;= 0 || origin == null || visualPoint == null || rawPoint == null) return;
+            float interval = 1f / sampleRateHz;
+            float now = Time.unscaledTime;
+            // 元実装と同じ上限10回の追いつき処理。Updateの実行周期を超える測定精度は保証しない。
+            for (int guard = 0; now &gt;= nextSampleTime &amp;&amp; guard &lt; 10; guard++)
+            {
+                Capture();
+                nextSampleTime += interval;
+            }
+            if (now - nextSampleTime &gt; 1f) nextSampleTime = now + interval;
+        }
+
+        private void Capture()
+        {
+            PoseSample sample = PoseMath.Measure(origin, visualPoint, rawPoint,
+                normalAxis, penetrationWhenNegative, positionScale,
+                sampleIndex++, Time.realtimeSinceStartupAsDouble, contact != null &amp;&amp; contact.IsTouching);
+            lock (sampleLock)
+            {
+                latest = sample;
+                hasSample = true;
+            }
+        }
+
+        public bool TryGetLatestSample(out PoseSample sample)
+        {
+            lock (sampleLock) { sample = latest; return hasSample; }
+        }
+    }
+}
+</code></pre></details><p class="item-documentation"><a href="files/01_unity/Runtime/U1_Pose/README.md" download>詳細（README）</a></p></article><article class="code-item" id="u2" aria-labelledby="u2-title"><div class="item-heading"><h2 id="u2-title">実空間のセンサデータとVR空間の連動</h2></div><p class="item-description">エンコーダで計測した変位量をTCP通信で受け取り，VR内のオブジェクトを移動し，変位量に応じて色を切り替えるスクリプト。</p><details class="code-disclosure" open><summary><span>コードを見る：SpongeVisualizer.cs</span><span class="line-count">51行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U2_Visualization/SpongeVisualizer.cs</span><a href="files/01_unity/Runtime/U2_Visualization/SpongeVisualizer.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="SpongeVisualizer.csのソースコード"><code>using UnityEngine;
+
+namespace Portfolio.Research
+{
+    /// &lt;summary&gt;SpongeVisualizerから入力・フィルタ・描画の責務を分離したサンプル。&lt;/summary&gt;
+    public sealed class SpongeVisualizer : MonoBehaviour
+    {
+        [SerializeField] private ExperimentTcpBridge tcp;
+        [SerializeField] private Renderer targetRenderer;
+        [SerializeField] private float movementScale = 0.001f;
+        [SerializeField] private Vector3 moveDirection = Vector3.forward;
+        [SerializeField, Range(0f, 0.5f)] private float smoothTime = 0.1f;
+        [SerializeField] private float noiseThreshold = 0.05f;
+        [SerializeField] private Color normalColor = Color.white, nearZeroColor = Color.blue, activeColor = Color.red;
+        [SerializeField] private bool useNearZeroColor = true;
+        [SerializeField] private float nearZeroThreshold = 1f, activeThreshold = 80f;
+        [Header(&quot;実機なしの表示確認用。研究計測値ではありません&quot;)]
+        [SerializeField] private bool useDemoInput;
+        [SerializeField] private float demoDisplacementMm;
+
+        private readonly DisplacementSignal signal = new DisplacementSignal();
+        private Vector3 initialPosition, velocity;
+
+        private void Start()
+        {
+            initialPosition = transform.localPosition;
+            if (targetRenderer == null) targetRenderer = GetComponent&lt;Renderer&gt;();
+            if (!useDemoInput &amp;&amp; tcp == null) Debug.LogWarning(&quot;TCP参照を設定してください。&quot;, this);
+            UpdateColor(useDemoInput ? demoDisplacementMm : tcp != null ? tcp.Displacement : 0f);
+        }
+
+        private void Update()
+        {
+            if (!useDemoInput &amp;&amp; tcp == null) return;
+            float raw = useDemoInput ? demoDisplacementMm : tcp.Displacement;
+            float filtered = signal.Observe(raw, noiseThreshold);
+            Vector3 target = initialPosition + moveDirection * filtered * movementScale;
+            transform.localPosition = Vector3.SmoothDamp(transform.localPosition, target, ref velocity, smoothTime);
+            UpdateColor(raw);
+        }
+
+        private void UpdateColor(float raw)
+        {
+            if (targetRenderer == null) return;
+            DisplacementBand band = DisplacementSignal.Classify(raw, useNearZeroColor, nearZeroThreshold, activeThreshold);
+            Color color = band == DisplacementBand.NearZero ? nearZeroColor :
+                          band == DisplacementBand.Active ? activeColor : normalColor;
+            if (targetRenderer.material.color != color) targetRenderer.material.color = color;
+        }
+    }
+}
+</code></pre></details><p class="item-documentation"><a href="files/01_unity/Runtime/U2_Visualization/README.md" download>詳細（README）</a></p></article><article class="code-item" id="u3" aria-labelledby="u3-title"><div class="item-heading"><h2 id="u3-title">実験条件の提示と主観評価の記録</h2></div><p class="item-description">剛性・振動条件の提示順をランダム化し，試行ごとの7段階評価を条件情報とともにCSVへ保存するスクリプト。</p><details class="code-disclosure" open><summary><span>コードを見る：ExperimentSequence.cs</span><span class="line-count">260行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/ExperimentSequence.cs</span><a href="files/01_unity/Runtime/U3_Experiment/ExperimentSequence.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ExperimentSequence.csのソースコード"><code>using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    public enum ExperimentRunState
+    {
+        NotStarted,
+        Presenting,
+        WaitingForNextSet,
+        Finished
+    }
+
+    public sealed class ExperimentSequence : MonoBehaviour
+    {
+        [Header(&quot;References&quot;)]
+        [SerializeField] private ExperimentTcpBridge tcpBridge;
+        [SerializeField] private SetCsvStore csvStore;
+
+        [Header(&quot;Experiment Settings&quot;)]
+        [Tooltip(&quot;実験開始時に全セットの条件順・CSVを準備します。開始後の設定変更は次の実験から反映されます。&quot;)]
+        [SerializeField, Min(1)] private int totalSets = 5;
+        [Tooltip(&quot;剛性条件の番号。初期値は2,3,4。正の整数で重複不可。&quot;)]
+        [SerializeField] private List&lt;int&gt; stiffnessIds = new List&lt;int&gt; { 2, 3, 4 };
+        [Tooltip(&quot;振動条件の番号。初期値は1,2。全剛性との組み合わせを1セットにします。0も使用可能。&quot;)]
+        [SerializeField] private List&lt;int&gt; vibrationIds = new List&lt;int&gt; { 1, 2 };
+        [Tooltip(&quot;0なら実験開始時に自動生成します。0以外なら同じ順番を再現できます。&quot;)]
+        [SerializeField] private int randomSeed;
+
+        [Header(&quot;Runtime Status (Read Only)&quot;)]
+        [SerializeField, HideInInspector] private ExperimentRunState state = ExperimentRunState.NotStarted;
+        [SerializeField, HideInInspector] private int sessionSeed;
+        [SerializeField, HideInInspector] private int currentSet;
+        [SerializeField, HideInInspector] private int currentTrial;
+        [SerializeField, HideInInspector] private int currentConditionId;
+        [SerializeField, HideInInspector] private List&lt;int&gt; currentOrder = new List&lt;int&gt;();
+
+        public event Action CurrentTrialChanged;
+        private readonly List&lt;List&lt;int&gt;&gt; plannedOrders = new List&lt;List&lt;int&gt;&gt;();
+        private List&lt;ExperimentCondition&gt; activeConditions = new List&lt;ExperimentCondition&gt;();
+
+        public ExperimentRunState State =&gt; state;
+        public int TotalSets =&gt; plannedOrders.Count &gt; 0 ? plannedOrders.Count : totalSets;
+        public int SessionSeed =&gt; sessionSeed;
+        public int CurrentSet =&gt; currentSet;
+        public int CurrentTrial =&gt; currentTrial;
+        public int CurrentConditionId =&gt; currentConditionId;
+        public int CurrentStiffnessId =&gt; GetConditionDefinition(currentConditionId).StiffnessId;
+        public int CurrentVibrationId =&gt; GetConditionDefinition(currentConditionId).VibrationId;
+        public IReadOnlyList&lt;int&gt; CurrentOrder =&gt; currentOrder;
+
+        public ExperimentCondition GetConditionDefinition(int id)
+        {
+            return id &gt;= 1 &amp;&amp; id &lt;= activeConditions.Count ? activeConditions[id - 1] : default;
+        }
+
+        private void OnEnable()
+        {
+            if (tcpBridge != null)
+            {
+                tcpBridge.NextRequested += HandleNextRequest;
+            }
+        }
+
+        private void OnDisable()
+        {
+            if (tcpBridge != null)
+            {
+                tcpBridge.NextRequested -= HandleNextRequest;
+            }
+        }
+
+        public void StartExperiment()
+        {
+            if (state != ExperimentRunState.NotStarted &amp;&amp; state != ExperimentRunState.Finished)
+            {
+                Debug.LogWarning(&quot;[ExperimentSequence] Experiment is already running.&quot;, this);
+                return;
+            }
+
+            if (!ValidateSettings())
+            {
+                return;
+            }
+
+            sessionSeed = randomSeed == 0 ? Environment.TickCount : randomSeed;
+            activeConditions = ExperimentCondition.BuildCombinations(stiffnessIds, vibrationIds);
+            plannedOrders.Clear();
+            plannedOrders.AddRange(ConditionSchedule.Create(activeConditions, totalSets, sessionSeed));
+            currentSet = 1;
+            csvStore.BeginSession();
+            // Prepare every answer target before presentation; later set starts
+            // must reuse these rows instead of clearing answers entered in advance.
+            for (int set = 1; set &lt;= plannedOrders.Count; set++)
+            {
+                var conditions = new List&lt;ExperimentCondition&gt;();
+                foreach (int id in plannedOrders[set - 1]) conditions.Add(GetConditionDefinition(id));
+                csvStore.CreateSet(set, conditions);
+            }
+            BeginCurrentSet();
+        }
+
+        public void StartNextSet()
+        {
+            if (state != ExperimentRunState.WaitingForNextSet)
+            {
+                Debug.LogWarning(&quot;[ExperimentSequence] Next set can only start while waiting.&quot;, this);
+                return;
+            }
+
+            if (currentSet &gt;= TotalSets)
+            {
+                state = ExperimentRunState.Finished;
+                return;
+            }
+
+            currentSet++;
+            BeginCurrentSet();
+        }
+
+        public void NextTrial()
+        {
+            if (state != ExperimentRunState.Presenting)
+            {
+                return;
+            }
+
+            int currentIndex = currentTrial - 1;
+            if (currentIndex + 1 &lt; currentOrder.Count)
+            {
+                currentTrial++;
+                ApplyCurrentCondition();
+                return;
+            }
+
+            CompleteCurrentSet();
+        }
+
+        public void PreviousTrial()
+        {
+            if (state != ExperimentRunState.Presenting || currentTrial &lt;= 1)
+            {
+                return;
+            }
+
+            currentTrial--;
+            ApplyCurrentCondition();
+        }
+
+        public void JumpToTrial(int trialNumber)
+        {
+            if (state != ExperimentRunState.Presenting ||
+                trialNumber &lt; 1 || trialNumber &gt; currentOrder.Count)
+            {
+                return;
+            }
+
+            currentTrial = trialNumber;
+            ApplyCurrentCondition();
+        }
+
+        public void ReapplyCurrentCondition()
+        {
+            if (state == ExperimentRunState.Presenting)
+            {
+                ApplyCurrentCondition();
+            }
+        }
+
+        public void ReopenLastTrial()
+        {
+            if ((state != ExperimentRunState.WaitingForNextSet &amp;&amp;
+                 state != ExperimentRunState.Finished) ||
+                currentOrder.Count == 0)
+            {
+                return;
+            }
+
+            state = ExperimentRunState.Presenting;
+            currentTrial = currentOrder.Count;
+            ApplyCurrentCondition();
+        }
+
+        private void BeginCurrentSet()
+        {
+            currentOrder = new List&lt;int&gt;(plannedOrders[currentSet - 1]);
+            currentTrial = 1;
+            state = ExperimentRunState.Presenting;
+
+            ApplyCurrentCondition();
+
+            Debug.Log(
+                $&quot;[ExperimentSequence] Set {currentSet} started. Order: {string.Join(&quot;, &quot;, currentOrder)}&quot;,
+                this);
+        }
+
+        private void ApplyCurrentCondition()
+        {
+            currentConditionId = currentOrder[currentTrial - 1];
+            tcpBridge?.PublishCondition(CurrentStiffnessId, CurrentVibrationId);
+            CurrentTrialChanged?.Invoke();
+
+            Debug.Log(
+                $&quot;[ExperimentSequence] Set {currentSet}, Trial {currentTrial}, Condition {currentConditionId}, Stiffness {CurrentStiffnessId}, Vibration {CurrentVibrationId}&quot;,
+                this);
+        }
+
+        private void CompleteCurrentSet()
+        {
+            currentConditionId = 0;
+            tcpBridge?.PublishCondition(0, 0);
+            CurrentTrialChanged?.Invoke();
+
+            if (currentSet &gt;= TotalSets)
+            {
+                state = ExperimentRunState.Finished;
+                Debug.Log(&quot;[ExperimentSequence] Experiment finished.&quot;, this);
+            }
+            else
+            {
+                state = ExperimentRunState.WaitingForNextSet;
+                Debug.Log(
+                    $&quot;[ExperimentSequence] Set {currentSet} finished. Start the next set from the Inspector.&quot;,
+                    this);
+            }
+        }
+
+        private void HandleNextRequest()
+        {
+            NextTrial();
+        }
+
+        private bool ValidateSettings()
+        {
+            if (csvStore == null)
+            {
+                Debug.LogError(&quot;[ExperimentSequence] SetCsvStore is not assigned.&quot;, this);
+                return false;
+            }
+
+            try
+            {
+                ExperimentCondition.BuildCombinations(stiffnessIds, vibrationIds);
+            }
+            catch (ArgumentException exception)
+            {
+                Debug.LogError(&quot;[ExperimentSequence] &quot; + exception.Message, this);
+                return false;
+            }
+
+            return true;
+        }
+
+        private void OnValidate()
+        {
+            totalSets = Mathf.Max(1, totalSets);
+        }
+    }
+}
+</code></pre></details><p class="item-documentation"><a href="files/01_unity/Runtime/U3_Experiment/README.md" download>詳細（README）</a></p></article><section class="companion-section" aria-labelledby="companion-title"><h2 id="companion-title">関連するソースファイル</h2><p>各作例で使用する通信・計算・保存・作図処理。</p><details class="code-disclosure"><summary><span>関連コード：ContactFlag.cs</span><span class="line-count">18行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U1_Pose/ContactFlag.cs</span><a href="files/01_unity/Runtime/U1_Pose/ContactFlag.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ContactFlag.csのソースコード"><code>using System.Collections.Generic;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    // SessyokuTriの複数Collider管理を抽出。自分と同じrootのColliderは除く。
+    public sealed class ContactFlag : MonoBehaviour
+    {
+        private readonly HashSet&lt;Collider&gt; contacts = new HashSet&lt;Collider&gt;();
+        public bool IsTouching =&gt; contacts.Count &gt; 0;
+        private bool Accept(Collider other) =&gt; other != null &amp;&amp; other.transform.root != transform.root;
+        private void OnTriggerEnter(Collider other) { if (Accept(other)) contacts.Add(other); }
+        private void OnTriggerStay(Collider other) { if (Accept(other)) contacts.Add(other); }
+        private void OnTriggerExit(Collider other) { contacts.Remove(other); }
+        // 改善: オブジェクト無効化後に接触状態を持ち越さない。
+        private void OnDisable() =&gt; contacts.Clear();
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：PoseMath.cs</span><span class="line-count">46行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U1_Pose/PoseMath.cs</span><a href="files/01_unity/Runtime/U1_Pose/PoseMath.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="PoseMath.csのソースコード"><code>using System;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    public enum SurfaceAxis { X, Y, Z }
+
+    [Serializable]
+    public struct PoseSample
+    {
+        public long Index;
+        public double TimeSeconds;
+        public Vector3 VisualPositionMm, RawPositionMm;
+        public Vector3 VisualEulerDegrees, RawEulerDegrees;
+        public float PenetrationMm;
+        public bool Contact;
+    }
+
+    public static class PoseMath
+    {
+        public static PoseSample Measure(Transform origin, Transform visual, Transform raw,
+            SurfaceAxis axis, bool negativeIsPenetration, float scale,
+            long index, double time, bool contact)
+        {
+            Vector3 visualLocal = origin.InverseTransformPoint(visual.position);
+            Vector3 rawLocal = origin.InverseTransformPoint(raw.position);
+            Quaternion inverseOrigin = Quaternion.Inverse(origin.rotation);
+            float normal = axis == SurfaceAxis.X ? rawLocal.x :
+                           axis == SurfaceAxis.Y ? rawLocal.y : rawLocal.z;
+            return new PoseSample
+            {
+                Index = index, TimeSeconds = time,
+                VisualPositionMm = visualLocal * scale,
+                RawPositionMm = rawLocal * scale,
+                VisualEulerDegrees = Normalize((inverseOrigin * visual.rotation).eulerAngles),
+                RawEulerDegrees = Normalize((inverseOrigin * raw.rotation).eulerAngles),
+                PenetrationMm = Mathf.Max(0f, negativeIsPenetration ? -normal : normal) * scale,
+                Contact = contact
+            };
+        }
+
+        private static Vector3 Normalize(Vector3 angles) =&gt;
+            new Vector3(Signed(angles.x), Signed(angles.y), Signed(angles.z));
+        private static float Signed(float value) =&gt; value &gt; 180f ? value - 360f : value;
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：DisplacementSignal.cs</span><span class="line-count">32行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U2_Visualization/DisplacementSignal.cs</span><a href="files/01_unity/Runtime/U2_Visualization/DisplacementSignal.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="DisplacementSignal.csのソースコード"><code>using System;
+
+namespace Portfolio.Research
+{
+    public enum DisplacementBand { Normal, NearZero, Active }
+
+    /// &lt;summary&gt;Unityに依存しないデッドバンド。色判定には必ず生の値を使う。&lt;/summary&gt;
+    public sealed class DisplacementSignal
+    {
+        private bool initialized;
+        public float Filtered { get; private set; }
+
+        public float Observe(float raw, float noiseThreshold)
+        {
+            if (!initialized || Math.Abs(raw - Filtered) &gt; noiseThreshold)
+            {
+                Filtered = raw;
+                initialized = true;
+            }
+            return Filtered;
+        }
+
+        public static DisplacementBand Classify(float raw, bool nearZeroEnabled,
+            float nearZeroThreshold, float activeThreshold)
+        {
+            float absolute = Math.Abs(raw);
+            if (nearZeroEnabled &amp;&amp; absolute &lt;= Math.Max(0, nearZeroThreshold))
+                return DisplacementBand.NearZero;
+            return absolute &gt;= activeThreshold ? DisplacementBand.Active : DisplacementBand.Normal;
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：ConditionSchedule.cs</span><span class="line-count">35行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/ConditionSchedule.cs</span><a href="files/01_unity/Runtime/U3_Experiment/ConditionSchedule.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ConditionSchedule.csのソースコード"><code>using System;
+using System.Collections.Generic;
+
+namespace Portfolio.Research
+{
+    /// &lt;summary&gt;元ExperimentSequenceのseed式とFisher–Yates順序を維持。&lt;/summary&gt;
+    public static class ConditionSchedule
+    {
+        public static List&lt;List&lt;int&gt;&gt; Create(IReadOnlyList&lt;ExperimentCondition&gt; conditions, int totalSets, int seed)
+        {
+            if (conditions == null || conditions.Count == 0) throw new ArgumentException(&quot;条件が必要です。&quot;);
+            if (totalSets &lt; 1) throw new ArgumentOutOfRangeException(nameof(totalSets));
+            var sets = new List&lt;List&lt;int&gt;&gt;();
+            for (int set = 1; set &lt;= totalSets; set++)
+            {
+                var order = new List&lt;int&gt;();
+                foreach (ExperimentCondition condition in conditions) order.Add(condition.Id);
+                Shuffle(order, new Random(unchecked(seed + set * 1009)));
+                sets.Add(order);
+            }
+            return sets;
+        }
+
+        private static void Shuffle&lt;T&gt;(IList&lt;T&gt; list, Random random)
+        {
+            for (int index = list.Count - 1; index &gt; 0; index--)
+            {
+                int swap = random.Next(index + 1);
+                T value = list[index];
+                list[index] = list[swap];
+                list[swap] = value;
+            }
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：ExperimentCondition.cs</span><span class="line-count">41行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/ExperimentCondition.cs</span><a href="files/01_unity/Runtime/U3_Experiment/ExperimentCondition.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ExperimentCondition.csのソースコード"><code>using System;
+using System.Collections.Generic;
+
+namespace Portfolio.Research
+{
+    // Internal ID identifies a combination; only the two factor IDs go over TCP.
+    public readonly struct ExperimentCondition
+    {
+        public int Id { get; }
+        public int StiffnessId { get; }
+        public int VibrationId { get; }
+
+        public ExperimentCondition(int id, int stiffnessId, int vibrationId)
+        {
+            Id = id;
+            StiffnessId = stiffnessId;
+            VibrationId = vibrationId;
+        }
+
+        public static List&lt;ExperimentCondition&gt; BuildCombinations(
+            IReadOnlyList&lt;int&gt; stiffnessIds, IReadOnlyList&lt;int&gt; vibrationIds)
+        {
+            Validate(stiffnessIds, 1, &quot;Stiffness IDs&quot;);
+            Validate(vibrationIds, 0, &quot;Vibration IDs&quot;);
+            var result = new List&lt;ExperimentCondition&gt;();
+            foreach (int stiffness in stiffnessIds)
+                foreach (int vibration in vibrationIds)
+                    result.Add(new ExperimentCondition(result.Count + 1, stiffness, vibration));
+            return result;
+        }
+
+        private static void Validate(IReadOnlyList&lt;int&gt; ids, int minimum, string label)
+        {
+            if (ids == null || ids.Count == 0) throw new ArgumentException(label + &quot; cannot be empty.&quot;);
+            var used = new HashSet&lt;int&gt;();
+            foreach (int id in ids)
+                if (id &lt; minimum || !used.Add(id))
+                    throw new ArgumentException(label + &quot; must be unique and &gt;= &quot; + minimum + &quot;.&quot;);
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：ExperimentSamplePanel.cs</span><span class="line-count">46行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/ExperimentSamplePanel.cs</span><a href="files/01_unity/Runtime/U3_Experiment/ExperimentSamplePanel.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ExperimentSamplePanel.csのソースコード"><code>using UnityEngine;
+
+namespace Portfolio.Research
+{
+    /// &lt;summary&gt;新規の接続例。元のSteamVR質問紙画面の再現ではありません。&lt;/summary&gt;
+    public sealed class ExperimentSamplePanel : MonoBehaviour
+    {
+        [SerializeField] private ExperimentSequence sequence;
+        [SerializeField] private SetCsvStore csv;
+        private int[] scores;
+        private int displayedSet = -1, displayedTrial = -1;
+        private string status = &quot;&quot;;
+
+        private void OnGUI()
+        {
+            if (sequence == null || csv == null) return;
+            GUILayout.BeginArea(new Rect(15, 15, 520, 650), GUI.skin.box);
+            GUILayout.Label(&quot;研究実験コードの接続サンプル / mouse + keyboard&quot;);
+            GUILayout.Label(&quot;State: &quot; + sequence.State + &quot;  Set: &quot; + sequence.CurrentSet + &quot; Trial: &quot; + sequence.CurrentTrial);
+            if (GUILayout.Button(&quot;Start experiment&quot;)) sequence.StartExperiment();
+            if (GUILayout.Button(&quot;Start next set&quot;)) sequence.StartNextSet();
+            if (sequence.State == ExperimentRunState.Presenting)
+            {
+                if (scores == null || displayedSet != sequence.CurrentSet || displayedTrial != sequence.CurrentTrial)
+                {
+                    displayedSet = sequence.CurrentSet;
+                    displayedTrial = sequence.CurrentTrial;
+                    if (!csv.TryGetScores(displayedSet, displayedTrial, out scores))
+                        scores = new int[csv.Questions.Count];
+                    for (int i = 0; i &lt; scores.Length; i++) if (scores[i] == 0) scores[i] = 4;
+                }
+                for (int i = 0; i &lt; scores.Length; i++)
+                {
+                    GUILayout.Label(csv.Questions[i].prompt);
+                    scores[i] = GUILayout.SelectionGrid(scores[i] - 1, new[] { &quot;1&quot;, &quot;2&quot;, &quot;3&quot;, &quot;4&quot;, &quot;5&quot;, &quot;6&quot;, &quot;7&quot; }, 7) + 1;
+                }
+                if (GUILayout.Button(&quot;Save answers&quot;))
+                    status = csv.SaveAnswers(displayedSet, displayedTrial, scores, out string error) ? &quot;Saved.&quot; : error;
+                if (GUILayout.Button(&quot;Previous trial&quot;)) sequence.PreviousTrial();
+                if (GUILayout.Button(&quot;Next trial&quot;)) sequence.NextTrial();
+            }
+            GUILayout.Label(status);
+            GUILayout.EndArea();
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：ExperimentTcpBridge.cs</span><span class="line-count">356行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/ExperimentTcpBridge.cs</span><a href="files/01_unity/Runtime/U3_Experiment/ExperimentTcpBridge.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="ExperimentTcpBridge.csのソースコード"><code>using System;
+using System.Collections.Concurrent;
+using System.Globalization;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    /// &lt;summary&gt;
+    /// dSPACEとのTCP通信だけを担当するクラス。
+    /// 受信: displacement,button\n
+    /// 送信: stiffnessId,vibrationId\n（0,0は停止）
+    /// &lt;/summary&gt;
+    public sealed class ExperimentTcpBridge : MonoBehaviour
+    {
+        [Header(&quot;TCP Server&quot;)]
+        [Tooltip(&quot;0.0.0.0なら、このPCのすべてのネットワークインターフェースで待ち受けます。&quot;)]
+        [SerializeField] private string bindAddress = &quot;0.0.0.0&quot;;
+        [SerializeField, Min(1)] private int port = 12345;
+        [SerializeField, Min(0.005f)] private float sendIntervalSeconds = 0.02f;
+
+        [Header(&quot;dSPACE Button&quot;)]
+        [SerializeField] private float buttonThreshold = 0.5f;
+        [SerializeField, Min(0f)] private float debounceSeconds = 0.15f;
+
+        [Header(&quot;Runtime Status (Read Only)&quot;)]
+        [SerializeField] private float displacement;
+        [SerializeField] private float buttonLevel;
+        [SerializeField] private bool isListening;
+        [SerializeField] private bool isClientConnected;
+        [SerializeField] private int sentStiffnessId;
+        [SerializeField] private int sentVibrationId;
+
+        private readonly ConcurrentQueue&lt;string&gt; receivedLines = new ConcurrentQueue&lt;string&gt;();
+        private readonly ConcurrentQueue&lt;string&gt; logMessages = new ConcurrentQueue&lt;string&gt;();
+        private readonly object outputLock = new object();
+        private readonly object socketLock = new object();
+
+        private Thread serverThread;
+        private TcpListener listener;
+        private TcpClient activeClient;
+        private volatile bool stopRequested;
+        private bool lastButtonPressed;
+        private float lastButtonEventTime = float.NegativeInfinity;
+
+        public event Action NextRequested;
+
+        public float Displacement =&gt; displacement;
+        public float ButtonLevel =&gt; buttonLevel;
+        public bool IsListening =&gt; isListening;
+        public bool IsClientConnected =&gt; isClientConnected;
+        public int SentStiffnessId =&gt; sentStiffnessId;
+        public int SentVibrationId =&gt; sentVibrationId;
+
+        private void OnEnable()
+        {
+            StartServer();
+        }
+
+        private void Update()
+        {
+            while (receivedLines.TryDequeue(out string line))
+            {
+                ProcessReceivedLine(line);
+            }
+
+            while (logMessages.TryDequeue(out string message))
+            {
+                Debug.Log(message, this);
+            }
+        }
+
+        public void PublishCondition(int stiffnessId, int vibrationId)
+        {
+            lock (outputLock)
+            {
+                sentStiffnessId = stiffnessId;
+                sentVibrationId = vibrationId;
+            }
+        }
+
+        public void StartServer()
+        {
+            if (serverThread != null &amp;&amp; serverThread.IsAlive)
+            {
+                return;
+            }
+
+            stopRequested = false;
+            serverThread = new Thread(ServerLoop)
+            {
+                IsBackground = true,
+                Name = &quot;SI2026 Experiment TCP Server&quot;
+            };
+            serverThread.Start();
+        }
+
+        public void StopServer()
+        {
+            stopRequested = true;
+
+            lock (socketLock)
+            {
+                try { activeClient?.Close(); } catch { }
+                try { listener?.Stop(); } catch { }
+            }
+
+            if (serverThread != null &amp;&amp; serverThread.IsAlive)
+            {
+                serverThread.Join(500);
+            }
+
+            serverThread = null;
+            isListening = false;
+            isClientConnected = false;
+        }
+
+        private void ServerLoop()
+        {
+            try
+            {
+                IPAddress address = ResolveBindAddress(bindAddress);
+                TcpListener localListener = new TcpListener(address, port);
+
+                lock (socketLock)
+                {
+                    listener = localListener;
+                }
+
+                localListener.Start();
+                isListening = true;
+                logMessages.Enqueue($&quot;[ExperimentTcpBridge] Listening on {address}:{port}&quot;);
+
+                while (!stopRequested)
+                {
+                    if (!localListener.Pending())
+                    {
+                        Thread.Sleep(10);
+                        continue;
+                    }
+
+                    TcpClient client = localListener.AcceptTcpClient();
+                    lock (socketLock)
+                    {
+                        activeClient = client;
+                    }
+
+                    RunClientSession(client);
+
+                    lock (socketLock)
+                    {
+                        if (ReferenceEquals(activeClient, client))
+                        {
+                            activeClient = null;
+                        }
+                    }
+                }
+            }
+            catch (SocketException exception)
+            {
+                if (!stopRequested)
+                {
+                    logMessages.Enqueue($&quot;[ExperimentTcpBridge] Socket error: {exception.Message}&quot;);
+                }
+            }
+            catch (Exception exception)
+            {
+                if (!stopRequested)
+                {
+                    logMessages.Enqueue($&quot;[ExperimentTcpBridge] Error: {exception}&quot;);
+                }
+            }
+            finally
+            {
+                isListening = false;
+                isClientConnected = false;
+                lock (socketLock)
+                {
+                    try { activeClient?.Close(); } catch { }
+                    try { listener?.Stop(); } catch { }
+                    activeClient = null;
+                    listener = null;
+                }
+            }
+        }
+
+        private void RunClientSession(TcpClient client)
+        {
+            try
+            {
+                client.NoDelay = true;
+                isClientConnected = true;
+                logMessages.Enqueue($&quot;[ExperimentTcpBridge] Connected: {client.Client.RemoteEndPoint}&quot;);
+
+                using (client)
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] receiveBuffer = new byte[2048];
+                    StringBuilder lineBuffer = new StringBuilder();
+                    int sleepMilliseconds = Math.Max(
+                        1,
+                        (int)Math.Round(
+                            sendIntervalSeconds * 1000f,
+                            MidpointRounding.AwayFromZero));
+
+                    while (!stopRequested &amp;&amp; client.Connected)
+                    {
+                        if (stream.DataAvailable)
+                        {
+                            int length = stream.Read(receiveBuffer, 0, receiveBuffer.Length);
+                            if (length &lt;= 0)
+                            {
+                                break;
+                            }
+
+                            AppendReceivedText(lineBuffer, Encoding.UTF8.GetString(receiveBuffer, 0, length));
+                        }
+
+                        int stiffnessId;
+                        int vibrationId;
+                        lock (outputLock)
+                        {
+                            stiffnessId = sentStiffnessId;
+                            vibrationId = sentVibrationId;
+                        }
+
+                        string message = stiffnessId.ToString(CultureInfo.InvariantCulture) + &quot;,&quot; +
+                            vibrationId.ToString(CultureInfo.InvariantCulture) + &quot;\n&quot;;
+                        byte[] sendBytes = Encoding.UTF8.GetBytes(message);
+                        stream.Write(sendBytes, 0, sendBytes.Length);
+
+                        Thread.Sleep(sleepMilliseconds);
+                    }
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is SocketException ||
+                exception is ObjectDisposedException)
+            {
+                if (!stopRequested)
+                {
+                    logMessages.Enqueue($&quot;[ExperimentTcpBridge] Client disconnected: {exception.Message}&quot;);
+                }
+            }
+            finally
+            {
+                isClientConnected = false;
+            }
+        }
+
+        private void AppendReceivedText(StringBuilder lineBuffer, string text)
+        {
+            lineBuffer.Append(text);
+
+            while (true)
+            {
+                int newlineIndex = FindNewline(lineBuffer);
+                if (newlineIndex &lt; 0)
+                {
+                    break;
+                }
+
+                string line = lineBuffer.ToString(0, newlineIndex).TrimEnd('\r');
+                lineBuffer.Remove(0, newlineIndex + 1);
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    receivedLines.Enqueue(line);
+                }
+            }
+        }
+
+        private static int FindNewline(StringBuilder text)
+        {
+            for (int index = 0; index &lt; text.Length; index++)
+            {
+                if (text[index] == '\n')
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private void ProcessReceivedLine(string line)
+        {
+            string[] values = line.Split(',');
+            if (values.Length &lt; 2 ||
+                !TryParseFloat(values[0], out float receivedDisplacement) ||
+                !TryParseFloat(values[1], out float receivedButton))
+            {
+                Debug.LogWarning($&quot;[ExperimentTcpBridge] Invalid receive line: {line}&quot;, this);
+                return;
+            }
+
+            displacement = receivedDisplacement;
+            buttonLevel = receivedButton;
+
+            bool isPressed = receivedButton &gt;= buttonThreshold;
+            if (isPressed &amp;&amp; !lastButtonPressed &amp;&amp;
+                Time.unscaledTime - lastButtonEventTime &gt;= debounceSeconds)
+            {
+                lastButtonEventTime = Time.unscaledTime;
+                NextRequested?.Invoke();
+            }
+
+            lastButtonPressed = isPressed;
+        }
+
+        private static bool TryParseFloat(string text, out float value)
+        {
+            return float.TryParse(
+                text.Trim(),
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out value);
+        }
+
+        private static IPAddress ResolveBindAddress(string address)
+        {
+            if (string.IsNullOrWhiteSpace(address) || address == &quot;0.0.0.0&quot; || address == &quot;*&quot;)
+            {
+                return IPAddress.Any;
+            }
+
+            if (!IPAddress.TryParse(address, out IPAddress parsedAddress))
+            {
+                throw new FormatException($&quot;Invalid bind address: {address}&quot;);
+            }
+
+            return parsedAddress;
+        }
+
+        private void OnDisable()
+        {
+            StopServer();
+        }
+
+        private void OnApplicationQuit()
+        {
+            StopServer();
+        }
+
+        private void OnValidate()
+        {
+            port = Mathf.Clamp(port, 1, 65535);
+            sendIntervalSeconds = Mathf.Max(0.005f, sendIntervalSeconds);
+            debounceSeconds = Mathf.Max(0f, debounceSeconds);
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：QuestionnaireHistory.cs</span><span class="line-count">40行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/QuestionnaireHistory.cs</span><a href="files/01_unity/Runtime/U3_Experiment/QuestionnaireHistory.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="QuestionnaireHistory.csのソースコード"><code>using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+
+namespace Portfolio.Research
+{
+    // Only persisted scores belong here; the selection cursor's default 4 is not an answer.
+    public static class QuestionnaireHistory
+    {
+        public static string FormatSet(int questionCount,
+            IEnumerable&lt;(int Set, int Trial, int[] Scores)&gt; rows, int setNumber)
+        {
+            return Format(questionCount, rows.Where(row =&gt; row.Set == setNumber));
+        }
+
+        public static string Format(int questionCount,
+            IEnumerable&lt;(int Set, int Trial, int[] Scores)&gt; rows)
+        {
+            var text = new StringBuilder();
+            text.Append(&quot;Set&quot;.PadRight(5)).Append(&quot; | &quot;).Append(&quot;Seq&quot;.PadRight(5));
+            for (int i = 0; i &lt; questionCount; i++)
+                text.Append(&quot; | &quot;).Append((&quot;Q&quot; + (i + 1).ToString(CultureInfo.InvariantCulture)).PadRight(5));
+            text.AppendLine();
+            foreach (var row in rows)
+            {
+                text.Append(row.Set.ToString(CultureInfo.InvariantCulture).PadRight(5))
+                    .Append(&quot; | &quot;).Append(row.Trial.ToString(CultureInfo.InvariantCulture).PadRight(5));
+                for (int i = 0; i &lt; questionCount; i++)
+                {
+                    int score = row.Scores != null &amp;&amp; i &lt; row.Scores.Length ? row.Scores[i] : 0;
+                    text.Append(&quot; | &quot;).Append((score == 0 ? string.Empty :
+                        score.ToString(CultureInfo.InvariantCulture)).PadRight(5));
+                }
+                text.AppendLine();
+            }
+            return text.ToString();
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：SetCsvStore.cs</span><span class="line-count">378行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/SetCsvStore.cs</span><a href="files/01_unity/Runtime/U3_Experiment/SetCsvStore.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="SetCsvStore.csのソースコード"><code>using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    public sealed class SetCsvStore : MonoBehaviour
+    {
+        [Header(&quot;Session&quot;)]
+        [SerializeField] private string participantId = &quot;P001&quot;;
+        [SerializeField] private string outputFolderName = &quot;ExperimentResults&quot;;
+
+        [Header(&quot;7-point Questions&quot;)]
+        [Tooltip(&quot;実験開始後に行った変更は、次のセッションから反映されます。&quot;)]
+        [SerializeField] private List&lt;SurveyQuestionDefinition&gt; questions =
+            new List&lt;SurveyQuestionDefinition&gt; { new SurveyQuestionDefinition() };
+
+        [Header(&quot;Runtime Status (Read Only)&quot;)]
+        [SerializeField] private string currentSessionDirectory;
+
+        private sealed class TrialRow
+        {
+            public int Trial;
+            public int Condition;
+            public int Stiffness;
+            public int Vibration;
+            public int[] Scores;
+            public string AnsweredAt = string.Empty;
+            public int Revision;
+        }
+
+        private readonly Dictionary&lt;int, List&lt;TrialRow&gt;&gt; rowsBySet =
+            new Dictionary&lt;int, List&lt;TrialRow&gt;&gt;();
+        private List&lt;SurveyQuestionDefinition&gt; activeQuestions =
+            new List&lt;SurveyQuestionDefinition&gt;();
+        private string cachedAnswerHistory;
+        private readonly Dictionary&lt;int, string&gt; cachedSetHistory = new Dictionary&lt;int, string&gt;();
+
+        public bool SessionActive { get; private set; }
+        public string OutputRootDirectory =&gt; Path.GetFullPath(
+            Path.Combine(Application.dataPath, outputFolderName, &quot;si2026&quot;));
+        public string CurrentSessionDirectory =&gt; currentSessionDirectory;
+        public IReadOnlyList&lt;SurveyQuestionDefinition&gt; Questions =&gt;
+            SessionActive ? activeQuestions : questions;
+        public int MaxCreatedSet =&gt; rowsBySet.Count == 0 ? 0 : rowsBySet.Keys.Max();
+
+        public void BeginSession()
+        {
+            rowsBySet.Clear();
+            cachedSetHistory.Clear();
+            cachedAnswerHistory = null;
+            activeQuestions = BuildQuestionSnapshot();
+
+            string safeParticipantId = SanitizeFileName(participantId, &quot;Participant&quot;);
+            string timestamp = DateTime.Now.ToString(&quot;yyyyMMdd_HHmmss&quot;, CultureInfo.InvariantCulture);
+            string rootDirectory = OutputRootDirectory;
+            currentSessionDirectory = CreateUniqueDirectory(rootDirectory, $&quot;{safeParticipantId}_{timestamp}&quot;);
+            Directory.CreateDirectory(currentSessionDirectory);
+            SessionActive = true;
+
+            Debug.Log($&quot;[SetCsvStore] Session directory: {currentSessionDirectory}&quot;, this);
+        }
+
+        public void CreateSet(int setNumber, IReadOnlyList&lt;ExperimentCondition&gt; conditionOrder)
+        {
+            if (!SessionActive)
+            {
+                BeginSession();
+            }
+
+            if (setNumber &lt; 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(setNumber));
+            }
+
+            if (conditionOrder == null || conditionOrder.Count == 0)
+            {
+                throw new ArgumentException(&quot;At least one condition is required.&quot;, nameof(conditionOrder));
+            }
+
+            List&lt;TrialRow&gt; rows = new List&lt;TrialRow&gt;(conditionOrder.Count);
+            for (int index = 0; index &lt; conditionOrder.Count; index++)
+            {
+                rows.Add(new TrialRow
+                {
+                    Trial = index + 1,
+                    Condition = conditionOrder[index].Id,
+                    Stiffness = conditionOrder[index].StiffnessId,
+                    Vibration = conditionOrder[index].VibrationId,
+                    Scores = new int[activeQuestions.Count]
+                });
+            }
+
+            rowsBySet[setNumber] = rows;
+            cachedSetHistory.Remove(setNumber);
+            cachedAnswerHistory = null;
+            WriteSetFile(setNumber);
+        }
+
+        public bool HasSet(int setNumber)
+        {
+            return rowsBySet.ContainsKey(setNumber);
+        }
+
+        public int GetTrialCount(int setNumber)
+        {
+            return rowsBySet.TryGetValue(setNumber, out List&lt;TrialRow&gt; rows) ? rows.Count : 0;
+        }
+
+        public bool TryGetCondition(int setNumber, int trialNumber, out int conditionId)
+        {
+            conditionId = 0;
+            if (!TryGetRow(setNumber, trialNumber, out TrialRow row))
+            {
+                return false;
+            }
+
+            conditionId = row.Condition;
+            return true;
+        }
+
+        public bool TryGetScores(int setNumber, int trialNumber, out int[] scores)
+        {
+            scores = null;
+            if (!TryGetRow(setNumber, trialNumber, out TrialRow row))
+            {
+                return false;
+            }
+
+            scores = (int[])row.Scores.Clone();
+            return true;
+        }
+
+        public bool TryGetConditionPair(int setNumber, int trialNumber, out ExperimentCondition condition)
+        {
+            condition = default;
+            if (!TryGetRow(setNumber, trialNumber, out TrialRow row)) return false;
+            condition = new ExperimentCondition(row.Condition, row.Stiffness, row.Vibration);
+            return true;
+        }
+
+        public string GetAnswerHistoryText()
+        {
+            if (cachedAnswerHistory == null)
+                cachedAnswerHistory = QuestionnaireHistory.Format(Questions.Count,
+                    rowsBySet.OrderBy(pair =&gt; pair.Key).SelectMany(pair =&gt;
+                        pair.Value.Select(row =&gt; (pair.Key, row.Trial, row.Scores))));
+            return cachedAnswerHistory;
+        }
+
+        public string GetAnswerHistoryText(int setNumber)
+        {
+            if (!rowsBySet.TryGetValue(setNumber, out List&lt;TrialRow&gt; rows))
+                return string.Empty;
+            if (!cachedSetHistory.TryGetValue(setNumber, out string history))
+            {
+                history = QuestionnaireHistory.FormatSet(Questions.Count,
+                    rows.Select(row =&gt; (setNumber, row.Trial, row.Scores)), setNumber);
+                cachedSetHistory[setNumber] = history;
+            }
+            return history;
+        }
+
+        public bool SaveAnswers(int setNumber, int trialNumber, IReadOnlyList&lt;int&gt; scores, out string error)
+        {
+            error = string.Empty;
+            if (!TryGetRow(setNumber, trialNumber, out TrialRow row))
+            {
+                error = $&quot;Set {setNumber}, Trial {trialNumber} does not exist.&quot;;
+                return false;
+            }
+
+            if (scores == null || scores.Count != activeQuestions.Count)
+            {
+                error = $&quot;Expected {activeQuestions.Count} answer(s).&quot;;
+                return false;
+            }
+
+            for (int index = 0; index &lt; scores.Count; index++)
+            {
+                if (scores[index] &lt; 1 || scores[index] &gt; 7)
+                {
+                    error = $&quot;Answer {index + 1} must be from 1 to 7.&quot;;
+                    return false;
+                }
+            }
+
+            int[] previousScores = row.Scores;
+            string previousAnsweredAt = row.AnsweredAt;
+            int previousRevision = row.Revision;
+            row.Scores = scores.ToArray();
+            row.AnsweredAt = DateTime.Now.ToString(&quot;yyyy-MM-dd HH:mm:ss&quot;, CultureInfo.InvariantCulture);
+            row.Revision++;
+
+            try
+            {
+                WriteSetFile(setNumber);
+                cachedAnswerHistory = null;
+                cachedSetHistory.Remove(setNumber);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                row.Scores = previousScores;
+                row.AnsweredAt = previousAnsweredAt;
+                row.Revision = previousRevision;
+                error = exception.Message;
+                Debug.LogError($&quot;[SetCsvStore] Save failed: {exception}&quot;, this);
+                return false;
+            }
+        }
+
+        private bool TryGetRow(int setNumber, int trialNumber, out TrialRow row)
+        {
+            row = null;
+            if (!rowsBySet.TryGetValue(setNumber, out List&lt;TrialRow&gt; rows) ||
+                trialNumber &lt; 1 || trialNumber &gt; rows.Count)
+            {
+                return false;
+            }
+
+            row = rows[trialNumber - 1];
+            return true;
+        }
+
+        private void WriteSetFile(int setNumber)
+        {
+            if (!rowsBySet.TryGetValue(setNumber, out List&lt;TrialRow&gt; rows))
+            {
+                return;
+            }
+
+            StringBuilder csv = new StringBuilder();
+            csv.Append(&quot;Trial,Condition,Stiffness,Vibration,AnsweredAt,Revision&quot;);
+            foreach (SurveyQuestionDefinition question in activeQuestions)
+            {
+                csv.Append(',').Append(EscapeCsv(question.id));
+            }
+            csv.AppendLine();
+
+            foreach (TrialRow row in rows)
+            {
+                csv.Append(row.Trial.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(row.Condition.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(row.Stiffness.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(row.Vibration.ToString(CultureInfo.InvariantCulture)).Append(',')
+                    .Append(EscapeCsv(row.AnsweredAt)).Append(',')
+                    .Append(row.Revision.ToString(CultureInfo.InvariantCulture));
+
+                foreach (int score in row.Scores)
+                {
+                    csv.Append(',');
+                    if (score &gt; 0)
+                    {
+                        csv.Append(score.ToString(CultureInfo.InvariantCulture));
+                    }
+                }
+                csv.AppendLine();
+            }
+
+            string path = GetSetFilePath(setNumber);
+            string temporaryPath = path + &quot;.tmp&quot;;
+            File.WriteAllText(temporaryPath, csv.ToString(), new UTF8Encoding(true));
+
+            if (!File.Exists(path))
+            {
+                File.Move(temporaryPath, path);
+                return;
+            }
+
+            try
+            {
+                File.Replace(temporaryPath, path, null);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                File.Copy(temporaryPath, path, true);
+                File.Delete(temporaryPath);
+            }
+        }
+
+        private string GetSetFilePath(int setNumber)
+        {
+            string safeParticipantId = SanitizeFileName(participantId, &quot;Participant&quot;);
+            return Path.Combine(
+                currentSessionDirectory,
+                $&quot;{safeParticipantId}_Set{setNumber:00}.csv&quot;);
+        }
+
+        private List&lt;SurveyQuestionDefinition&gt; BuildQuestionSnapshot()
+        {
+            List&lt;SurveyQuestionDefinition&gt; snapshot = questions
+                .Where(question =&gt; question != null)
+                .Select(question =&gt; question.Clone())
+                .ToList();
+
+            if (snapshot.Count == 0)
+            {
+                snapshot.Add(new SurveyQuestionDefinition());
+            }
+
+            HashSet&lt;string&gt; usedIds = new HashSet&lt;string&gt;(StringComparer.OrdinalIgnoreCase);
+            for (int index = 0; index &lt; snapshot.Count; index++)
+            {
+                string id = SanitizeColumnId(snapshot[index].id, $&quot;Question{index + 1}&quot;);
+                string uniqueId = id;
+                int suffix = 2;
+                while (!usedIds.Add(uniqueId))
+                {
+                    uniqueId = $&quot;{id}_{suffix++}&quot;;
+                }
+                snapshot[index].id = uniqueId;
+            }
+
+            return snapshot;
+        }
+
+        private static string CreateUniqueDirectory(string root, string baseName)
+        {
+            string candidate = Path.Combine(root, baseName);
+            int suffix = 2;
+            while (Directory.Exists(candidate))
+            {
+                candidate = Path.Combine(root, $&quot;{baseName}_{suffix++}&quot;);
+            }
+            return candidate;
+        }
+
+        private static string SanitizeFileName(string value, string fallback)
+        {
+            string result = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+            foreach (char invalidCharacter in Path.GetInvalidFileNameChars())
+            {
+                result = result.Replace(invalidCharacter, '_');
+            }
+            return string.IsNullOrWhiteSpace(result) ? fallback : result;
+        }
+
+        private static string SanitizeColumnId(string value, string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return fallback;
+            }
+
+            StringBuilder result = new StringBuilder();
+            foreach (char character in value.Trim())
+            {
+                if (char.IsLetterOrDigit(character) || character == '_')
+                {
+                    result.Append(character);
+                }
+                else
+                {
+                    result.Append('_');
+                }
+            }
+
+            return result.Length == 0 ? fallback : result.ToString();
+        }
+
+        private static string EscapeCsv(string value)
+        {
+            value ??= string.Empty;
+            if (!value.Contains(&quot;,&quot;) &amp;&amp; !value.Contains(&quot;\&quot;&quot;) &amp;&amp;
+                !value.Contains(&quot;\n&quot;) &amp;&amp; !value.Contains(&quot;\r&quot;))
+            {
+                return value;
+            }
+
+            return $&quot;\&quot;{value.Replace(&quot;\&quot;&quot;, &quot;\&quot;\&quot;&quot;)}\&quot;&quot;;
+        }
+    }
+}
+</code></pre></details><details class="code-disclosure"><summary><span>関連コード：SurveyQuestionDefinition.cs</span><span class="line-count">31行</span></summary><div class="file-toolbar"><span>01_unity/Runtime/U3_Experiment/SurveyQuestionDefinition.cs</span><a href="files/01_unity/Runtime/U3_Experiment/SurveyQuestionDefinition.cs" download>ダウンロード</a></div><pre tabindex="0" aria-label="SurveyQuestionDefinition.csのソースコード"><code>using System;
+using UnityEngine;
+
+namespace Portfolio.Research
+{
+    [Serializable]
+    public sealed class SurveyQuestionDefinition
+    {
+        [Tooltip(&quot;CSVの列名に使う識別子。半角英数字と_を推奨します。&quot;)]
+        public string id = &quot;Repulsion&quot;;
+
+        [TextArea(2, 4)]
+        public string prompt = &quot;反発感をどの程度強く感じましたか？&quot;;
+
+        public string leftLabel = &quot;まったく感じない&quot;;
+        public string middleLabel = &quot;中程度&quot;;
+        public string rightLabel = &quot;非常に強く感じる&quot;;
+
+        public SurveyQuestionDefinition Clone()
+        {
+            return new SurveyQuestionDefinition
+            {
+                id = id,
+                prompt = prompt,
+                leftLabel = leftLabel,
+                middleLabel = middleLabel,
+                rightLabel = rightLabel
+            };
+        }
+    }
+}
+</code></pre></details></section><p class="back-bottom"><a href="../index.html#skills">← ホームページの使用技術へ戻る</a></p></main><footer class="site-footer page-width"><p>妻鹿 成紘 / Naruhiro Mega</p><p><a href="../index.html">研究ポートフォリオ</a><a href="../index.html#contact">お問い合わせ</a></p></footer><script src="../assets/demo-videos.js" defer></script></body></html>

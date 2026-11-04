@@ -103,7 +103,7 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
 .period { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); padding-top: 3px; white-space: nowrap; }
 .experience-row h4 { font-size: 15px; font-weight: 550; margin-bottom: 4px; }
 .experience-row div p { font-size: 13px; color: var(--secondary); line-height: 1.8; }
-.skills-group, .qualifications-group { padding-top: 24px; border-top: 1px solid var(--line); }
+.qualifications-group { padding-top: 24px; border-top: 1px solid var(--line); }
 .qualification-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; font-size: 13px; }
 .qualification-row strong { margin-left: 10px; font-weight: 550; }
 .qualification-row time { font-size: 12px; color: var(--muted); }
@@ -115,6 +115,8 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
 .site-footer { border-top: 1px solid var(--line); padding: 24px 0 35px; display: flex; justify-content: space-between; gap: 20px; font-size: 11px; color: var(--muted); }
 .site-footer p:last-child { display: flex; flex-wrap: wrap; gap: 22px; }
 @media (max-width: 900px) {
+  .site-header nav { gap: 12px; flex-shrink: 0; }
+  .site-header nav a { min-width: 64px; padding-inline: 10px; font-size: 14px; letter-spacing: 0; white-space: nowrap; }
   .profile-overview { grid-template-columns: 340px minmax(0,1fr); gap: 28px; }
   .profile-details { padding-left: 28px; }
   .profile-heading { --portrait-width: 120px; column-gap: 18px; }
@@ -132,8 +134,8 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
   .page-width, .header-inner { width: calc(100% - 48px); }
   .header-inner { min-height: 0; flex-direction: column; align-items: stretch; padding-block: 14px; gap: 10px; }
   .site-title { align-self: flex-start; font-size: 13px; }
-  nav { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
-  nav a { min-width: 0; min-height: 46px; padding: 8px 12px; }
+  .site-header nav { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
+  .site-header nav a { min-width: 0; min-height: 46px; padding: 8px 4px; font-size: 14px; letter-spacing: .02em; white-space: nowrap; }
   .profile { padding: 32px 0; }
   .profile-about { margin-top: 24px; }
   h1 { font-size: 32px; }
@@ -173,7 +175,6 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
   .experience-row { display: block; padding-bottom: 23px; }
   .period { margin-bottom: 5px; }
   .skills-list { grid-template-columns: 1fr; row-gap: 19px; }
-  .skills-group { padding-top: 23px; }
   .site-footer { flex-direction: column; gap: 7px; padding-bottom: 25px; }
   .site-footer p:last-child { gap: 16px; }
 }
@@ -202,3 +203,19 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
 .image-copyright a { color: inherit; text-underline-offset: 3px; }
 .publication--with-notice { row-gap: 14px; }
 .publication-copyright-notice { grid-column: 1 / -1; font-size: 12px; line-height: 1.65; color: var(--secondary); overflow-wrap: anywhere; }
+
+/* Links to the selected research code and design files. */
+.skill-link { display: inline-flex; align-items: baseline; padding-block: 5px; margin-block: -5px; text-decoration-color: #a3b5b7; }
+.skill-link:hover { text-decoration-color: currentColor; }
+@media (max-width: 700px) {
+  .skill-link { min-height: 36px; }
+}
+
+.contact-description { font-size: 14px; line-height: 1.8; color: var(--secondary); }
+.contact-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px; margin-top: 20px; }
+.contact-button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px 20px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-size: 14px; text-decoration: none; }
+.contact-button:hover { background: #183b45; border-color: #183b45; color: var(--paper); }
+.contact-email { font-size: 14px; color: var(--secondary); overflow-wrap: anywhere; }
+@media print {
+  .contact-button { background: transparent; color: black; border-color: var(--line); }
+}
