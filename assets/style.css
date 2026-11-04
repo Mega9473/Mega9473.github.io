@@ -200,3 +200,5 @@ h2 span { display: inline-block; margin-left: 14px; font-size: 13px; color: var(
 .image-credit > a { color: inherit; text-decoration-color: #b6bfbb; text-underline-offset: 3px; }
 .image-copyright { display: block; margin-top: 4px; }
 .image-copyright a { color: inherit; text-underline-offset: 3px; }
+.publication--with-notice { row-gap: 14px; }
+.publication-copyright-notice { grid-column: 1 / -1; font-size: 12px; line-height: 1.65; color: var(--secondary); overflow-wrap: anywhere; }
