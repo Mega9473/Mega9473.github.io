@@ -1,5 +1,10 @@
 Unityの動作動画を追加する手順
 
+設定済みの動画:
+  u1: unity-polishing.mp4 / unity-polishing.jpg
+  u2: unity-sensor-vr.mp4 / unity-sensor-vr.jpg
+  u3: 未設定（動画は表示されません）
+
 1. 撮影したMP4をこのフォルダへ保存します。
    研磨の例: unity-polishing.mp4
 
@@ -19,4 +24,4 @@ Unityの動作動画を追加する手順
 caption は録画内容に合わせて変更できます。
 poster は任意のサムネイル画像のパスです。不要なら空欄のままにします。
 src / poster のパスは code/unity.html を基準に指定します。
-公開するときは、動画ファイルと変更した demo-videos.js もアップロードします。
+公開するときは、動画ファイル・サムネイル画像と変更した demo-videos.js もアップロードします。

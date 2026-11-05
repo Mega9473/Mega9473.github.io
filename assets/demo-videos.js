@@ -1,21 +1,21 @@
 (() => {
-  // src / poster are relative to code/unity.html. Leave src empty until recorded.
+  // src / poster are relative to code/unity.html. Leave src empty to hide the video.
   // Example: src: '../assets/videos/unity-polishing.mp4'
   const videos = {
     u1: {
-      src: '',
-      poster: '',
-      caption: '研磨面に対する工具の位置・姿勢計測の動作例。'
+      src: '../assets/videos/unity-polishing.mp4',
+      poster: '../assets/videos/unity-polishing.jpg',
+      caption: '研磨工具の操作とVR内の表示（左：VR映像，右：実際の操作）'
     },
     u2: {
-      src: '',
-      poster: '',
-      caption: '実空間のセンサデータとVR空間の連動の動作例。'
+      src: '../assets/videos/unity-sensor-vr.mp4',
+      poster: '../assets/videos/unity-sensor-vr.jpg',
+      caption: '装置の操作に連動するVR内の表示（左：VR映像，右：実際の操作）'
     },
     u3: {
       src: '',
       poster: '',
-      caption: '実験条件の提示と主観評価の記録の動作例。'
+      caption: '実験条件の提示と主観評価の記録の動作例'
     }
   };
 

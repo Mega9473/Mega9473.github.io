@@ -15,6 +15,11 @@
 .code-figure > a { display: block; }
 .code-figure figcaption { margin-top: 8px; font-size: 12px; line-height: 1.8; color: var(--muted); }
 .code-figure figcaption a { margin-left: 8px; white-space: nowrap; }
+.artifact-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-block: 22px 24px; }
+.artifact-gallery figure { min-width: 0; }
+.artifact-gallery a { display: block; }
+.artifact-gallery img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: white; border: 1px solid var(--line); }
+.artifact-gallery figcaption { margin-top: 8px; font-size: 12px; line-height: 1.8; color: var(--muted); }
 .code-video { margin-block: 22px 24px; }
 .code-video video { display: block; width: 100%; max-width: 100%; height: auto; max-height: 560px; object-fit: contain; background: #151b1b; border: 1px solid var(--line); }
 .code-video video:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
@@ -50,6 +55,7 @@
   .category-nav a { font-size: 12px; }
   .item-heading h2 { font-size: 19px; }
   .item-description { font-size: 14px; }
+  .artifact-gallery { grid-template-columns: 1fr; gap: 22px; }
   .code-page summary { padding: 12px; }
   .code-disclosure pre { padding: 15px; font-size: 11px; max-height: 390px; }
   .file-toolbar { padding-inline: 12px; }
